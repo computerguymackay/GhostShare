@@ -1,7 +1,8 @@
 // Ported from QuickShare (github.com/computerguymackay/QuickShare).
 //
 // [diverges from QuickShare] Log lines never include r.RemoteAddr (CLAUDE.md:
-// "Never log IPs"), and the download name comes from the stored filename.
+// "Never log IPs"), the download name comes from the stored filename, and
+// no Last-Modified header is sent (it would reveal the file's mtime).
 // The download-counting rule is unchanged.
 
 package main
@@ -95,7 +96,9 @@ func (fs *FileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
 
 	cw := &countingWriter{ResponseWriter: w, status: http.StatusOK}
-	http.ServeContent(cw, r, name, fi.ModTime(), f)
+	// A zero modtime means no Last-Modified header, so the file's mtime
+	// never reaches the recipient.
+	http.ServeContent(cw, r, name, time.Time{}, f)
 
 	counted := r.Method == http.MethodGet &&
 		r.Header.Get("Range") == "" &&

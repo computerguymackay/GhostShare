@@ -293,3 +293,41 @@ func TestLogHasNoAddressesOrFullTokens(t *testing.T) {
 		t.Errorf("log contains a full token:\n%s", out)
 	}
 }
+
+// The file's modification time must not reach the recipient.
+func TestNoFileTimestampsInResponse(t *testing.T) {
+	e := newServerEnv(t)
+	f := testFile(t, content)
+	old := time.Date(2019, 3, 14, 15, 9, 26, 0, time.UTC)
+	if err := os.Chtimes(f, old, old); err != nil {
+		t.Fatal(err)
+	}
+	tok := e.share(t, f, 5, 0)
+	for _, tc := range []struct {
+		method string
+		hdr    map[string]string
+	}{
+		{"GET", nil},
+		{"HEAD", nil},
+		{"GET", map[string]string{"Range": "bytes=0-4"}},
+	} {
+		resp, _ := e.do(t, tc.method, tok, tc.hdr)
+		for _, h := range []string{"Last-Modified", "ETag"} {
+			if v := resp.Header.Get(h); v != "" {
+				t.Errorf("%s %v: %s = %q, want no such header", tc.method, tc.hdr, h, v)
+			}
+		}
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				if strings.Contains(v, "2019") || strings.Contains(v, "Mar") {
+					t.Errorf("%s %v: header %s = %q looks like the file's mtime", tc.method, tc.hdr, k, v)
+				}
+			}
+		}
+	}
+	// With no Last-Modified, a conditional request still gets the full file.
+	resp, body := e.do(t, "GET", tok, map[string]string{"If-Modified-Since": old.Add(time.Hour).Format(http.TimeFormat)})
+	if resp.StatusCode != 200 || body != content {
+		t.Fatalf("If-Modified-Since: %d %q, want 200 with the file", resp.StatusCode, body)
+	}
+}
