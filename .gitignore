@@ -1,0 +1,31 @@
+# Binaries
+ghostshare
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Go workspace
+go.work
+go.work.sum
+
+# Environment files
+.env
+.env.*
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
