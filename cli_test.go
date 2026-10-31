@@ -374,7 +374,8 @@ func TestCLIRevokeWhileRunning(t *testing.T) {
 
 func TestCLIShortFlags(t *testing.T) {
 	e := newCLIEnv(t)
-	out, errOut, code := e.run(t, "-m", "3", "--e", "2h", "-j", testFile(t, "x"))
+	png := filepath.Join(t.TempDir(), "qr.png")
+	out, errOut, code := e.run(t, "-m", "3", "--e", "2h", "-j", "-o", png, testFile(t, "x"))
 	if code != 0 {
 		t.Fatal(errOut)
 	}
@@ -383,6 +384,9 @@ func TestCLIShortFlags(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(out), &v); err != nil || v.MaxDownloads != 3 {
 		t.Fatalf("short flags not applied: %q %v", out, err)
+	}
+	if !fileExists(png) {
+		t.Fatal("-o did not write the QR PNG")
 	}
 	if out, _, code := e.run(t, "list", "-j"); code != 0 || !strings.HasPrefix(out, "[") {
 		t.Fatalf("list -j: %d %q", code, out)
@@ -455,5 +459,140 @@ func TestCLIHelpAndVersion(t *testing.T) {
 		if code != 0 || !strings.Contains(out, attribution) {
 			t.Errorf("%v: %d %q", args, code, out)
 		}
+	}
+}
+
+// Phase 4 check (CLAUDE.md, Build Order): `ghostshare report.pdf -m 3 -e 2h -q`
+// works end to end, with only the link on stdout.
+func TestCLIPhase4ReportPDF(t *testing.T) {
+	e := newCLIEnv(t)
+	pdf := filepath.Join(t.TempDir(), "report.pdf")
+	os.WriteFile(pdf, []byte("%PDF-1.4 test"), 0o644)
+	out, errOut, code := e.run(t, pdf, "-m", "3", "-e", "2h", "-q")
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 1 || !strings.HasSuffix(lines[0], "/report.pdf") {
+		t.Fatalf("stdout = %q, want only the link", out)
+	}
+	link := lines[0]
+	linkParts(t, link)
+	for _, want := range []string{"█", securityWarning, "3 downloads", "Tor Browser", "Onion Browser"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr is missing %q:\n%s", want, errOut)
+		}
+	}
+	items := e.list(t)
+	if len(items) != 1 || items[0].MaxDownloads != 3 || time.Until(time.Unix(items[0].ExpiresAt, 0)) < 119*time.Minute {
+		t.Fatalf("share limits not applied: %+v", items)
+	}
+	for i := 1; i <= 3; i++ {
+		if code, body := e.download(t, link); code != 200 || body != "%PDF-1.4 test" {
+			t.Fatalf("download %d: %d %q", i, code, body)
+		}
+	}
+	if code, _ := e.download(t, link); code != 410 {
+		t.Fatalf("fourth download: %d, want 410", code)
+	}
+}
+
+func TestCLIQRKeepsLinkOnStdout(t *testing.T) {
+	e := newCLIEnv(t)
+	png := filepath.Join(t.TempDir(), "qr.png")
+	out, errOut, code := e.run(t, testFile(t, "x"), "--qr", "--qr-out", png)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "http://") {
+		t.Fatalf("stdout = %q, want only the link", out)
+	}
+	if !strings.Contains(errOut, "█") {
+		t.Fatal("QR code not rendered on stderr")
+	}
+	checkQRPNG(t, png, lines[0])
+}
+
+func TestCLIJSONWithQRIsPipeClean(t *testing.T) {
+	e := newCLIEnv(t)
+	out, errOut, code := e.run(t, testFile(t, "x"), "-j", "-q")
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	var v struct {
+		URL string `json:"url"`
+	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		t.Fatalf("stdout is not exactly one JSON object: %q (%v)", out, err)
+	}
+	linkParts(t, v.URL)
+	if strings.Contains(out, "█") || !strings.Contains(errOut, "█") {
+		t.Fatal("the QR code must go to stderr only")
+	}
+}
+
+func TestCLIConfigDefaults(t *testing.T) {
+	e := newCLIEnv(t)
+	cfg := "[server]\nwan = \"203.0.113.5:9000\"\n\n[share]\ndefault_max_downloads = 4\ndefault_expiry = \"3h\"\n"
+	os.MkdirAll(e.home, 0o700)
+	os.WriteFile(filepath.Join(e.home, "config.toml"), []byte(cfg), 0o600)
+
+	out, errOut, code := e.run(t, testFile(t, "x"), "-j")
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	var v struct {
+		ExpiresAt    *string `json:"expires_at"`
+		MaxDownloads int     `json:"max_downloads"`
+	}
+	json.Unmarshal([]byte(out), &v)
+	if v.MaxDownloads != 4 || v.ExpiresAt == nil {
+		t.Fatalf("config defaults not applied: %q", out)
+	}
+	if exp, _ := time.Parse(time.RFC3339, *v.ExpiresAt); time.Until(exp) < 179*time.Minute {
+		t.Fatalf("expires_at %q, want ~3h", *v.ExpiresAt)
+	}
+	if !strings.Contains(errOut, "server.wan") {
+		t.Errorf("no warning about the QuickShare-only key:\n%s", errOut)
+	}
+	// Flags still win over the config.
+	out, _, _ = e.run(t, testFile(t, "y"), "-j", "-m", "1")
+	json.Unmarshal([]byte(out), &v)
+	if v.MaxDownloads != 1 {
+		t.Fatalf("-m did not override the config: %q", out)
+	}
+}
+
+func TestCLIConfigTemplateWritten(t *testing.T) {
+	e := newCLIEnv(t)
+	e.share(t, testFile(t, "x"))
+	b, err := os.ReadFile(filepath.Join(e.home, "config.toml"))
+	if err != nil || !strings.Contains(string(b), "default_max_downloads = 1") {
+		t.Fatalf("config template: %v %q", err, b)
+	}
+}
+
+func TestCLIInteractive(t *testing.T) {
+	e := newCLIEnv(t)
+	cmd := exec.Command(gsBinary, testFile(t, "x"), "-i", "-j")
+	cmd.Env = append(os.Environ(),
+		"GHOSTSHARE_HOME="+e.home, "GHOSTSHARE_GRACE=1s", "GHOSTSHARE_TICK=200ms",
+		"GHOSTSHARE_TOR_CONTROL="+e.controlAddr, "PATH="+e.path)
+	cmd.Stdin = strings.NewReader("5\n90m\ny\n")
+	var o, er bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &o, &er
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%v: %s", err, er.String())
+	}
+	var v struct {
+		MaxDownloads int `json:"max_downloads"`
+	}
+	if err := json.Unmarshal(o.Bytes(), &v); err != nil || v.MaxDownloads != 5 {
+		t.Fatalf("interactive answers not applied: %q %v", o.String(), err)
+	}
+	if !strings.Contains(er.String(), "Max downloads") || !strings.Contains(er.String(), "█") {
+		t.Fatalf("prompts or QR missing from stderr:\n%s", er.String())
 	}
 }

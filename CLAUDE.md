@@ -67,7 +67,7 @@ go test -race ./...
 GHOSTSHARE_TOR_TEST=1 go test -tags=tortest ./...
 # Shorten daemon timers for local testing
 GHOSTSHARE_GRACE=2s GHOSTSHARE_TICK=1s go test ./... ``` Build 
-expectations: seconds, not minutes. Binary ~16 MB (~11 MB stripped with -ldflags='-s -w'); pure-Go SQLite and net/http account for most of it, and QuickShare is ~17 MB. If a change makes 
+expectations: seconds, not minutes. Binary ~17 MB (~11.5 MB stripped with -ldflags='-s -w'); pure-Go SQLite and net/http account for most of it, and QuickShare is also ~17 MB. If a change makes 
 the build slow or requires CGO, that's a regression — stop and fix 
 it. --- Architecture ``` GhostShare/ ├── main.go # CLI entry, flag 
 parsing, dispatch ├── config.go # ~/.ghostshare/config.toml load/save 

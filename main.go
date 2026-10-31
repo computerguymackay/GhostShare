@@ -11,7 +11,6 @@
 //   - The share link uses the daemon's .onion address, and `list` shows each
 //     share's current link, since restarts change the onion address.
 //   - Every share prints the Tor security warning and the Tor Browser note.
-//   - -q/--qr, -o/--qr-out and config.toml defaults arrive in Phase 4.
 
 package main
 
@@ -40,12 +39,6 @@ const attribution = "based on QuickShare (github.com/computerguymackay/QuickShar
 // securityWarning is printed to stderr on every share (CLAUDE.md, Security & Privacy Invariants).
 const securityWarning = "warning: Tor provides anonymity, not file encryption. Anyone with this link can download the file. Encrypt sensitive files first (e.g. `age -p file && ghostshare file.age`)."
 
-// Defaults until config.toml support lands in Phase 4 (same as QuickShare's).
-const (
-	defaultMaxDownloads = 1
-	defaultExpiry       = "24h"
-)
-
 const usage = `ghostshare — share a file over a temporary Tor onion service
 ` + attribution + `
 
@@ -60,14 +53,17 @@ Share flags:
   -m, --max-downloads N   downloads allowed (default 1; 0 = unlimited, needs --expires)
   -e, --expires DURATION  e.g. 30m, 24h, 7d (default 24h; 0 = never, needs --max-downloads)
   -i, --interactive       prompt for options
+  -q, --qr                show the link as a QR code (on stderr)
+  -o, --qr-out PATH       save the QR code as a PNG
   -j, --json              print {url, token, expires_at, max_downloads}
   -f, --watch             follow the daemon log after sharing
       --external-tor      only use an already-running Tor; never start one
 
 Short flags take one or two dashes (-i and --i are the same). Combined
-short flags like -ij are not supported; write -i -j.
+short flags like -iq are not supported; write -i -q.
 
 The link is always the last line on stdout, so link=$(ghostshare f.zip) works.
+Config: ~/.ghostshare/config.toml (or $GHOSTSHARE_HOME/config.toml)
 
 Requirements:
   Tor must be running or installed (tor on PATH). There is no clearnet fallback.
@@ -143,9 +139,11 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("ghostshare", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	maxFlag := fs.Int("max-downloads", defaultMaxDownloads, "")
-	expFlag := fs.String("expires", defaultExpiry, "")
+	maxFlag := fs.Int("max-downloads", 1, "")
+	expFlag := fs.String("expires", "", "")
 	interactive := fs.Bool("interactive", false, "")
+	showQR := fs.Bool("qr", false, "")
+	qrOut := fs.String("qr-out", "", "")
 	jsonOut := fs.Bool("json", false, "")
 	watch := fs.Bool("watch", false, "")
 	externalTor := fs.Bool("external-tor", false, "")
@@ -153,7 +151,7 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Short aliases. --external-tor deliberately has none.
 	short := map[string]string{
 		"m": "max-downloads", "e": "expires", "i": "interactive",
-		"j": "json", "f": "watch",
+		"q": "qr", "o": "qr-out", "j": "json", "f": "watch",
 	}
 	for s, long := range short {
 		fs.Var(fs.Lookup(long).Value, s, "")
@@ -168,10 +166,25 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "ghostshare: expected exactly one file\n\n%s", usage)
 		return 2
 	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		if long, ok := short[f.Name]; ok {
+			set[long] = true
+		} else {
+			set[f.Name] = true
+		}
+	})
 
 	p, err := resolvePaths()
 	if err != nil {
 		return errorf(stderr, "%v", err)
+	}
+	cfg, cfgWarns, err := loadConfig(p)
+	if err != nil {
+		return errorf(stderr, "config: %v", err)
+	}
+	for _, w := range cfgWarns {
+		warnf(stderr, "%s", w)
 	}
 
 	// The file.
@@ -193,13 +206,20 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// Limits.
-	maxDl := *maxFlag
-	expires, err := parseDuration(*expFlag)
+	maxDl := *cfg.Share.DefaultMaxDownloads
+	if set["max-downloads"] {
+		maxDl = *maxFlag
+	}
+	expStr := cfg.Share.DefaultExpiry
+	if set["expires"] {
+		expStr = *expFlag
+	}
+	expires, err := parseDuration(expStr)
 	if err != nil {
 		return errorf(stderr, "--expires: %v", err)
 	}
 	if *interactive {
-		maxDl, expires, err = promptOptions(stdin, stderr, maxDl, expires)
+		maxDl, expires, *showQR, err = promptOptions(stdin, stderr, maxDl, expires, *showQR)
 		if err != nil {
 			return errorf(stderr, "%v", err)
 		}
@@ -255,13 +275,33 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, link)
 	}
 
+	if *showQR {
+		fmt.Fprintln(stderr)
+		color := false
+		if f, ok := stderr.(*os.File); ok {
+			color = isTerminal(f)
+		}
+		if err := renderQR(stderr, link, color); err != nil {
+			warnf(stderr, "QR: %v", err)
+		}
+	}
+	if *qrOut != "" {
+		if err := writeQRPNG(*qrOut, link); err != nil {
+			return errorf(stderr, "write QR: %v", err)
+		}
+		fmt.Fprintf(stderr, "QR code saved to %s\n", *qrOut)
+	}
+	if *showQR || *qrOut != "" {
+		fmt.Fprintln(stderr, "the phone that scans it needs Tor Browser (Android) or Onion Browser (iOS) to open the link")
+	}
+
 	if *watch {
 		watchLog(p, logOffset, stderr)
 	}
 	return 0
 }
 
-func promptOptions(stdin io.Reader, w io.Writer, maxDl int, exp time.Duration) (int, time.Duration, error) {
+func promptOptions(stdin io.Reader, w io.Writer, maxDl int, exp time.Duration, qr bool) (int, time.Duration, bool, error) {
 	r := bufio.NewReader(stdin)
 	ask := func(q, def string) string {
 		fmt.Fprintf(w, "%s [%s]: ", q, def)
@@ -292,7 +332,12 @@ func promptOptions(stdin io.Reader, w io.Writer, maxDl int, exp time.Duration) (
 		}
 		fmt.Fprintln(w, " ", err)
 	}
-	return maxDl, exp, nil
+	def := "n"
+	if qr {
+		def = "y"
+	}
+	ans := strings.ToLower(ask("Show QR code? (y/n)", def))
+	return maxDl, exp, strings.HasPrefix(ans, "y"), nil
 }
 
 func watchLog(p Paths, offset int64, w io.Writer) {

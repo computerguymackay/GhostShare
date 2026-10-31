@@ -3,7 +3,9 @@ module github.com/computerguymackay/GhostShare
 go 1.26.0
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/cretz/bine v0.2.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	modernc.org/sqlite v1.38.2
