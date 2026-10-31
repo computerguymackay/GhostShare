@@ -53,16 +53,18 @@ func TestTorShareEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { sess.Close() }) // also on failure; Close is idempotent
 	t.Logf("spawned Tor: %v", sess.spawned)
 	socks := sess.socks()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	start := time.Now()
 	onion, err := sess.Listen(ctx)
 	if err != nil {
-		sess.Close()
 		t.Fatal(err)
 	}
+	t.Logf("published after %v", time.Since(start).Round(time.Second))
 	if onion.Key != nil {
 		t.Fatal("onion private key reached ghostshare")
 	}
@@ -73,9 +75,11 @@ func TestTorShareEndToEnd(t *testing.T) {
 	go hs.Serve(onion)
 
 	host := onion.ID + ".onion"
-	if err := sess.WaitReachable(ctx, host, 2*time.Minute); err != nil {
+	start = time.Now()
+	if err := sess.WaitReachable(ctx, host, healthTimeout); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("reachable %v later", time.Since(start).Round(time.Second))
 
 	client := onionClient(t, socks)
 	resp, err := client.Get("http://" + host + "/" + tok + "/file.txt")
@@ -139,6 +143,7 @@ func TestTorSpawnedIsOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 	sess := &torSession{t: tt, spawned: true, proc: proc}
+	t.Cleanup(func() { sess.Close() })
 	args := strings.Join(proc.cmd.Args, " ")
 	if !strings.Contains(args, "__OwningControllerProcess") {
 		t.Errorf("tor args lack __OwningControllerProcess: %s", args)

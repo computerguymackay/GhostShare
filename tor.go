@@ -34,7 +34,11 @@ const (
 	// onionPort is the port on the .onion address, so links need no port.
 	onionPort = 80
 
-	healthTimeout = 30 * time.Second
+	// healthTimeout is the total budget for the reachability check. On the
+	// live network a new onion usually answered within 2-24s, but a lookup
+	// sometimes stalls and only a fresh attempt gets through, so allow
+	// several attempts.
+	healthTimeout = 2 * time.Minute
 	killTimeout   = 5 * time.Second
 )
 
@@ -285,11 +289,36 @@ func spawnTor(path string) (*tor.Tor, *torProcess, error) {
 // Listen creates the session's v3 onion service on port 80. The private key
 // is discarded by Tor and never reaches ghostshare, so it can't be written
 // anywhere. The service is removed when it or the session is closed.
+//
+// Listen returns once the onion's descriptor is on several directory
+// servers (see waitPublished), not just the first one, so the reachability
+// check that follows doesn't look it up too early.
 func (s *torSession) Listen(ctx context.Context) (*onionListener, error) {
+	// A spawned Tor starts with its network off; turn it on and wait for
+	// bootstrap. For a running Tor this is a no-op.
+	if err := s.t.EnableNetwork(ctx, true); err != nil {
+		return nil, fmt.Errorf("connect Tor to the network: %w", err)
+	}
+
+	// Listen for descriptor uploads before the onion exists, so none are
+	// missed. bine relays events with a blocking send, so the buffer is
+	// large and the listener is removed before we stop reading it.
+	events := make(chan control.Event, 256)
+	if err := s.t.Control.AddEventListener(events, control.EventCodeHSDesc); err != nil {
+		return nil, fmt.Errorf("watch onion publication: %w", err)
+	}
+	evCtx, stopEvents := context.WithCancel(ctx)
+	go s.t.Control.HandleEvents(evCtx)
+	defer func() {
+		s.t.Control.RemoveEventListener(events, control.EventCodeHSDesc)
+		stopEvents()
+	}()
+
 	svc, err := s.t.Listen(ctx, &tor.ListenConf{
 		Version3:    true,
 		DiscardKey:  true,
 		RemotePorts: []int{onionPort},
+		NoWait:      true, // waitPublished below does the waiting
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create onion service: %w", err)
@@ -298,7 +327,63 @@ func (s *torSession) Listen(ctx context.Context) (*onionListener, error) {
 		svc.Close()
 		return nil, errors.New("create onion service: Tor returned a private key despite DiscardPK; refusing to continue")
 	}
+	if err := waitPublished(ctx, events, svc.ID); err != nil {
+		svc.Close()
+		return nil, fmt.Errorf("publish onion service: %w", err)
+	}
 	return &onionListener{OnionService: svc, sess: s}, nil
+}
+
+// Tor uploads each onion's two descriptors to 8 directory servers each,
+// all at once; on the live network they all finished within ~3s of each
+// other. A client that looks the onion up on a server that doesn't have it
+// yet gets a failure, and Tor then won't ask those servers again for about
+// 15 minutes. So wait for every upload, not just the first.
+//
+// extraUploadWait caps the wait after the first successful upload, in case
+// some uploads never report back (one of 16 often doesn't).
+var extraUploadWait = 10 * time.Second
+
+// waitPublished waits until every descriptor upload for id has finished
+// with at least one success, or one upload succeeded and extraUploadWait
+// has passed. It fails if every upload attempt fails.
+func waitPublished(ctx context.Context, events <-chan control.Event, id string) error {
+	attempted, uploaded, failed := 0, 0, 0
+	var reasons []string
+	var extra <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-extra:
+			return nil
+		case ev := <-events:
+			hs, _ := ev.(*control.HSDescEvent)
+			if hs == nil || hs.Address != id {
+				continue
+			}
+			switch hs.Action {
+			case "UPLOAD":
+				attempted++
+			case "UPLOADED":
+				uploaded++
+				if extra == nil {
+					extra = time.After(extraUploadWait)
+				}
+			case "FAILED":
+				failed++
+				reasons = append(reasons, hs.Reason)
+			default:
+				continue
+			}
+			if attempted > 0 && uploaded+failed >= attempted {
+				if uploaded == 0 {
+					return fmt.Errorf("every descriptor upload failed (%s)", strings.Join(reasons, ", "))
+				}
+				return nil // all uploads done
+			}
+		}
+	}
 }
 
 // WaitReachable blocks until host answers HTTP through Tor's SOCKS proxy,
@@ -331,6 +416,11 @@ func firstTCPListener(v string) string {
 	return ""
 }
 
+// reachAttemptTimeout bounds one reachability request through Tor: longer
+// than a slow successful lookup (24s measured), short enough that a stalled
+// one is abandoned for a fresh attempt.
+var reachAttemptTimeout = 30 * time.Second
+
 func waitReachable(ctx context.Context, socksAddr, host string, timeout time.Duration) error {
 	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
 	if err != nil {
@@ -347,8 +437,11 @@ func waitReachable(ctx context.Context, socksAddr, host string, timeout time.Dur
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodHead, "http://"+host+"/", nil)
+		// Bound each attempt, so one stuck lookup can't use up the whole budget.
+		actx, acancel := context.WithTimeout(ctx, reachAttemptTimeout)
+		req, _ := http.NewRequestWithContext(actx, http.MethodHead, "http://"+host+"/", nil)
 		resp, err := client.Do(req)
+		acancel()
 		if err == nil {
 			resp.Body.Close()
 			return nil

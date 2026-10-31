@@ -101,8 +101,16 @@ Tor Integration Rules 1. Detect, then spawn. On startup, in order:
    fall back to clearnet.
 2. Always v3 onions. tor.ListenConf{Version3: true, DiscardKey: true} on every Listen (bine v0.2.0 has no EnableV3). v2 is dead. 
 3. Health-check before printing a link. After creating the onion, 
-poll it through Tor's SOCKS proxy (127.0.0.1:9050) until it responds, 
-timeout ~30s. Never print a link that doesn't yet resolve. 4. 
+wait until every descriptor upload has finished (2 descriptors x 8 
+HSDirs; or 10s after the first success, since one upload often never 
+reports): a lookup that hits an HSDir without the descriptor fails, 
+and Tor won't re-ask those HSDirs for ~15 min. Then poll it through 
+Tor's SOCKS proxy (the session's own, from GETINFO 
+net/listeners/socks) until it responds: 30s per attempt, 2 min in 
+total. (Was ~30s total. Measured on the live network 2026-10-31: a new 
+onion usually answered in 2-24s, but lookups sometimes stall and only 
+a fresh attempt gets through.) Never 
+print a link that doesn't yet resolve. 4. 
 Teardown must be bulletproof. defer onion.Close() and a 
 SIGINT/SIGTERM handler. If we spawned Tor, kill it. If we attached to 
 a running Tor, leave it alone. No zombie processes, no leaked onion 

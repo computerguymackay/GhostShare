@@ -96,6 +96,18 @@ func (ft *fakeTor) onionCount() int {
 
 func (ft *fakeTor) serveControl(c net.Conn) {
 	var owned, unpublished []string
+	hsdesc := false // HS_DESC events enabled on this connection
+	publish := func(ids []string) {
+		// Like real Tor: one upload per directory server, here three.
+		for _, id := range ids {
+			for i := 0; i < 3; i++ {
+				io.WriteString(c, "650 HS_DESC UPLOAD "+id+" UNKNOWN $AAAA\r\n")
+			}
+			for i := 0; i < 3; i++ {
+				io.WriteString(c, "650 HS_DESC UPLOADED "+id+" UNKNOWN $AAAA\r\n")
+			}
+		}
+	}
 	defer func() {
 		c.Close()
 		ft.mu.Lock()
@@ -137,11 +149,9 @@ func (ft *fakeTor) serveControl(c net.Conn) {
 			reply("250 DisableNetwork=0\r\n")
 		case "SETEVENTS":
 			reply("250 OK\r\n")
-			if strings.Contains(line, "HS_DESC") {
-				for _, id := range unpublished {
-					reply("650 HS_DESC UPLOAD " + id + " UNKNOWN $AAAA\r\n")
-					reply("650 HS_DESC UPLOADED " + id + " UNKNOWN $AAAA\r\n")
-				}
+			hsdesc = strings.Contains(line, "HS_DESC")
+			if hsdesc {
+				publish(unpublished)
 				unpublished = nil
 			}
 		case "ADD_ONION":
@@ -168,6 +178,10 @@ func (ft *fakeTor) serveControl(c net.Conn) {
 				resp += "250-PrivateKey=ED25519-V3:" + base64.StdEncoding.EncodeToString(key) + "\r\n"
 			}
 			reply(resp + "250 OK\r\n")
+			if hsdesc {
+				publish(unpublished)
+				unpublished = nil
+			}
 		case "DEL_ONION":
 			if len(f) > 1 {
 				ft.mu.Lock()

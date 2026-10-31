@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cretz/bine/control"
 )
 
 // closedAddr returns an address with nothing listening on it.
@@ -302,5 +304,70 @@ func TestOnionServesAndDiesOnClose(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if _, _, ok := onionGet(t, ft.socksAddr(), "http://"+host+"/"); ok {
 		t.Fatal("onion still reachable after the session closed")
+	}
+}
+
+func hsdesc(action, id string) control.Event {
+	return &control.HSDescEvent{Action: action, Address: id, Reason: "UPLOAD_REJECTED"}
+}
+
+func TestWaitPublishedWaitsForEveryUpload(t *testing.T) {
+	defer func(d time.Duration) { extraUploadWait = d }(extraUploadWait)
+	extraUploadWait = time.Hour // only finishing every upload can end the wait
+
+	ev := make(chan control.Event, 20)
+	done := make(chan error, 1)
+	go func() { done <- waitPublished(context.Background(), ev, "me") }()
+	for i := 0; i < 4; i++ {
+		ev <- hsdesc("UPLOAD", "me")
+	}
+	ev <- hsdesc("UPLOADED", "someone-else")
+	ev <- hsdesc("UPLOADED", "me")
+	ev <- hsdesc("UPLOADED", "me")
+	ev <- hsdesc("FAILED", "me")
+	select {
+	case <-done:
+		t.Fatal("returned with an upload still in flight; a lookup could hit a server without the descriptor")
+	case <-time.After(100 * time.Millisecond):
+	}
+	ev <- hsdesc("UPLOADED", "me")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitPublishedSettlesForOneUploadAfterAWhile(t *testing.T) {
+	defer func(d time.Duration) { extraUploadWait = d }(extraUploadWait)
+	extraUploadWait = 200 * time.Millisecond
+	ev := make(chan control.Event, 20)
+	ev <- hsdesc("UPLOAD", "me")
+	ev <- hsdesc("UPLOAD", "me")
+	ev <- hsdesc("UPLOADED", "me")
+	start := time.Now()
+	if err := waitPublished(context.Background(), ev, "me"); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d < 150*time.Millisecond {
+		t.Fatalf("returned after %v, before the extra wait", d)
+	}
+}
+
+func TestWaitPublishedFailsWhenEveryUploadFails(t *testing.T) {
+	ev := make(chan control.Event, 20)
+	for i := 0; i < 2; i++ {
+		ev <- hsdesc("UPLOAD", "me")
+	}
+	ev <- hsdesc("FAILED", "me")
+	ev <- hsdesc("FAILED", "me")
+	if err := waitPublished(context.Background(), ev, "me"); err == nil || !strings.Contains(err.Error(), "UPLOAD_REJECTED") {
+		t.Fatalf("err = %v, want the upload failure reasons", err)
+	}
+}
+
+func TestWaitPublishedHonoursContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := waitPublished(ctx, make(chan control.Event), "me"); err == nil {
+		t.Fatal("no error after the context ended")
 	}
 }

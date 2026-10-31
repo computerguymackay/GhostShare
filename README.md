@@ -18,7 +18,7 @@ GhostShare is a small tool for people who already use Tor and want to share a fi
 ## Requirements
 
 - **Tor, running or installed.** GhostShare first tries a running Tor's control port (`127.0.0.1:9051`). If none is running, it starts `tor` from your `PATH` and stops it again when it's done. If neither works, it prints install instructions and exits.
-- **Tor Browser for recipients** (or `curl --socks5-hostname 127.0.0.1:9050 <link>`). A normal browser cannot open a `.onion` link. On phones: Tor Browser for Android, or Onion Browser on iOS.
+- **Tor Browser for recipients** (or `curl --socks5-hostname 127.0.0.1:9050 <link>`). A normal browser cannot open a `.onion` link. On phones: Tor Browser for Android, or Onion Browser on iOS. A brand-new onion usually opens within seconds, but now and then the Tor network takes a minute or two to find it; if the link doesn't load at first, wait a moment and try again.
 - **No clearnet fallback.** If Tor is unavailable, GhostShare refuses to share. It never serves a file over the open internet.
 
 Installing Tor:
