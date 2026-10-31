@@ -1,21 +1,25 @@
 # Binaries
-ghostshare
+/ghostshare
+/ghostshare-*
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-bin/
-dist/
+/bin/
+/dist/
 
-# Test binaries and coverage
+# Test and coverage output
 *.test
 *.out
 coverage.*
 *.coverprofile
 profile.cov
 
-# Go workspace
+# Dependency directories
+/vendor/
+
+# Go workspace file
 go.work
 go.work.sum
 
@@ -23,9 +27,13 @@ go.work.sum
 .env
 .env.*
 
-# Editors / OS
+# Editor and OS files
 .idea/
 .vscode/
 *.swp
+*.save
 *~
 .DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json

@@ -1,3 +1,3 @@
-module ghostshare
+module github.com/computerguymackay/GhostShare
 
-go 1.25.14
+go 1.25
