@@ -173,8 +173,36 @@ type torSession struct {
 	proc        *torProcess // set when spawned
 	controlAddr string
 	socksAddr   string // override from env, may be empty
-	closeOnce   sync.Once
-	closeErr    error
+
+	mu       sync.Mutex // guards closed, so onions and the session close in any order
+	closed   bool
+	closeErr error
+}
+
+// onionListener is the session's onion service as a net.Listener. Closing
+// it is safe even after the session has closed.
+type onionListener struct {
+	*tor.OnionService
+	sess *torSession
+	once sync.Once
+	err  error
+}
+
+func (o *onionListener) Close() error {
+	o.once.Do(func() {
+		o.sess.mu.Lock()
+		defer o.sess.mu.Unlock()
+		if o.sess.closed {
+			// Tor dropped the onion with our control connection; only the
+			// local listener is left.
+			if o.LocalListener != nil {
+				o.err = o.LocalListener.Close()
+			}
+			return
+		}
+		o.err = o.OnionService.Close()
+	})
+	return o.err
 }
 
 // connectTor finds a Tor in the order CLAUDE.md requires: a running Tor's
@@ -191,17 +219,12 @@ func connectTor(env torEnv, allowSpawn bool, progress io.Writer) (*torSession, e
 		return &torSession{t: t, controlAddr: env.controlAddr, socksAddr: env.socksAddr}, nil
 	}
 	attachErr := err
-	help := torInstallHelp
-	if errors.Is(attachErr, errTorAuth) {
-		help = torAuthHelp
-	}
 	if !allowSpawn {
-		return nil, fmt.Errorf("no usable Tor on control port %s: %v\n\n%s", env.controlAddr, attachErr, help)
+		return nil, torUnavailable(env.controlAddr, attachErr, true)
 	}
 	path, err := env.lookPath("tor")
 	if err != nil {
-		return nil, fmt.Errorf("no usable Tor on control port %s (%v), and no tor program on PATH\n\n%s",
-			env.controlAddr, attachErr, help)
+		return nil, torUnavailable(env.controlAddr, attachErr, false)
 	}
 	fmt.Fprintf(progress, "no running Tor at %s; starting %s\n", env.controlAddr, path)
 	t, proc, err := spawnTor(path)
@@ -209,6 +232,29 @@ func connectTor(env torEnv, allowSpawn bool, progress io.Writer) (*torSession, e
 		return nil, err
 	}
 	return &torSession{t: t, spawned: true, proc: proc, socksAddr: env.socksAddr}, nil
+}
+
+// torPreflight checks, without starting anything, that connectTor would
+// find a usable Tor. The error says what to do next.
+func torPreflight(env torEnv, externalTor bool) error {
+	st := probeTor(env)
+	if st.State == torRunning || (st.State == torSpawnable && !externalTor) {
+		return nil
+	}
+	return torUnavailable(st.ControlAddr, st.AttachErr, externalTor)
+}
+
+// torUnavailable is the error for "no Tor we may use", with install or
+// auth instructions.
+func torUnavailable(controlAddr string, attachErr error, externalTor bool) error {
+	help := torInstallHelp
+	if errors.Is(attachErr, errTorAuth) {
+		help = torAuthHelp
+	}
+	if externalTor {
+		return fmt.Errorf("--external-tor: no usable Tor on control port %s (%v)\n\n%s", controlAddr, attachErr, help)
+	}
+	return fmt.Errorf("no usable Tor on control port %s (%v), and no tor program on PATH\n\n%s", controlAddr, attachErr, help)
 }
 
 // spawnTor starts a private Tor with a temporary data directory. Tor's own
@@ -239,7 +285,7 @@ func spawnTor(path string) (*tor.Tor, *torProcess, error) {
 // Listen creates the session's v3 onion service on port 80. The private key
 // is discarded by Tor and never reaches ghostshare, so it can't be written
 // anywhere. The service is removed when it or the session is closed.
-func (s *torSession) Listen(ctx context.Context) (*tor.OnionService, error) {
+func (s *torSession) Listen(ctx context.Context) (*onionListener, error) {
 	svc, err := s.t.Listen(ctx, &tor.ListenConf{
 		Version3:    true,
 		DiscardKey:  true,
@@ -252,7 +298,7 @@ func (s *torSession) Listen(ctx context.Context) (*tor.OnionService, error) {
 		svc.Close()
 		return nil, errors.New("create onion service: Tor returned a private key despite DiscardPK; refusing to continue")
 	}
-	return svc, nil
+	return &onionListener{OnionService: svc, sess: s}, nil
 }
 
 // WaitReachable blocks until host answers HTTP through Tor's SOCKS proxy,
@@ -318,22 +364,26 @@ func waitReachable(ctx context.Context, socksAddr, host string, timeout time.Dur
 // Close removes the onion service and, if we started Tor, stops it and
 // deletes its data directory. An attached Tor is left running.
 func (s *torSession) Close() error {
-	s.closeOnce.Do(func() {
-		err := s.t.Close()
-		if !s.spawned {
-			s.closeErr = err
-			return
-		}
-		// bine waits only 300ms for Tor to exit; make sure it does.
-		if !s.proc.stop() {
-			s.closeErr = fmt.Errorf("tor (pid %d) did not exit", s.proc.cmd.Process.Pid)
-			return
-		}
-		if s.t.DataDir != "" {
-			os.RemoveAll(s.t.DataDir)
-		}
-	})
-	return s.closeErr
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return s.closeErr
+	}
+	s.closed = true
+	err := s.t.Close()
+	if !s.spawned {
+		s.closeErr = err
+		return s.closeErr
+	}
+	// bine waits only 300ms for Tor to exit; make sure it does.
+	if !s.proc.stop() {
+		s.closeErr = fmt.Errorf("tor (pid %d) did not exit", s.proc.cmd.Process.Pid)
+		return s.closeErr
+	}
+	if s.t.DataDir != "" {
+		os.RemoveAll(s.t.DataDir)
+	}
+	return nil
 }
 
 // torCreator starts tor with its output captured, and keeps a handle on the

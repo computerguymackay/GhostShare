@@ -8,7 +8,7 @@ import (
 
 func TestVersionIncludesAttribution(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if code := run([]string{"--version"}, &out, &errOut); code != 0 {
+	if code := run([]string{"--version"}, nil, &out, &errOut); code != 0 {
 		t.Fatalf("exit code %d, want 0", code)
 	}
 	if !strings.Contains(out.String(), attribution) {
@@ -21,7 +21,7 @@ func TestVersionIncludesAttribution(t *testing.T) {
 
 func TestHelpIncludesAttributionAndTorBrowser(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if code := run([]string{"--help"}, &out, &errOut); code != 0 {
+	if code := run([]string{"--help"}, nil, &out, &errOut); code != 0 {
 		t.Fatalf("exit code %d, want 0", code)
 	}
 	for _, want := range []string{attribution, "Tor Browser"} {

@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -12,74 +10,9 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
-
-// fakeTor is a minimal Tor control port: enough for PROTOCOLINFO,
-// AUTHENTICATE, GETINFO and QUIT.
-type fakeTor struct {
-	ln      net.Listener
-	authHdr string // the AUTH line of PROTOCOLINFO
-
-	mu   sync.Mutex
-	cmds []string
-}
-
-func newFakeTor(t *testing.T, authHdr string) *fakeTor {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ft := &fakeTor{ln: ln, authHdr: authHdr}
-	t.Cleanup(func() { ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go ft.serve(c)
-		}
-	}()
-	return ft
-}
-
-func (ft *fakeTor) serve(c net.Conn) {
-	defer c.Close()
-	r := bufio.NewReader(c)
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return
-		}
-		line = strings.TrimSpace(line)
-		ft.mu.Lock()
-		ft.cmds = append(ft.cmds, line)
-		ft.mu.Unlock()
-		switch {
-		case line == "PROTOCOLINFO":
-			io.WriteString(c, "250-PROTOCOLINFO 1\r\n250-"+ft.authHdr+"\r\n250-VERSION Tor=\"0.4.8.10\"\r\n250 OK\r\n")
-		case strings.HasPrefix(line, "AUTHENTICATE"):
-			io.WriteString(c, "250 OK\r\n")
-		case line == "GETINFO version":
-			io.WriteString(c, "250-version=0.4.8.10 (git-0123456789abcdef)\r\n250 OK\r\n")
-		case line == "QUIT":
-			io.WriteString(c, "250 closing connection\r\n")
-			return
-		default:
-			io.WriteString(c, "510 Unrecognized command\r\n")
-		}
-	}
-}
-
-func (ft *fakeTor) commands() []string {
-	ft.mu.Lock()
-	defer ft.mu.Unlock()
-	return append([]string(nil), ft.cmds...)
-}
 
 // closedAddr returns an address with nothing listening on it.
 func closedAddr(t *testing.T) string {
@@ -98,7 +31,7 @@ func missingTor(string) (string, error) { return "", errors.New("executable file
 
 func TestProbeRunning(t *testing.T) {
 	ft := newFakeTor(t, "AUTH METHODS=NULL")
-	st := probeTor(torEnv{controlAddr: ft.ln.Addr().String(), lookPath: missingTor})
+	st := probeTor(torEnv{controlAddr: ft.controlAddr(), lookPath: missingTor})
 	if st.State != torRunning || st.Version != "0.4.8.10" {
 		t.Fatalf("got %+v, want running 0.4.8.10", st)
 	}
@@ -120,7 +53,7 @@ func TestProbeMissing(t *testing.T) {
 
 func TestProbeAuthFailureIsReported(t *testing.T) {
 	ft := newFakeTor(t, `AUTH METHODS=COOKIE,SAFECOOKIE COOKIEFILE="/nonexistent/control.authcookie"`)
-	st := probeTor(torEnv{controlAddr: ft.ln.Addr().String(), lookPath: foundTor})
+	st := probeTor(torEnv{controlAddr: ft.controlAddr(), lookPath: foundTor})
 	if st.State != torSpawnable || !errors.Is(st.AttachErr, errTorAuth) {
 		t.Fatalf("got %+v, want spawnable with errTorAuth", st)
 	}
@@ -207,7 +140,7 @@ func TestConnectWithoutSpawnNeverLooksForTor(t *testing.T) {
 func TestAttachedTorIsLeftRunning(t *testing.T) {
 	ft := newFakeTor(t, "AUTH METHODS=NULL")
 	var progress bytes.Buffer
-	sess, err := connectTor(torEnv{controlAddr: ft.ln.Addr().String(), lookPath: missingTor}, true, &progress)
+	sess, err := connectTor(torEnv{controlAddr: ft.controlAddr(), lookPath: missingTor}, true, &progress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,42 +183,12 @@ func fakeSocks(t *testing.T, target string) (addr string, requested chan string)
 	}
 	t.Cleanup(func() { ln.Close() })
 	requested = make(chan string, 10)
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				hdr := make([]byte, 2)
-				io.ReadFull(c, hdr) // version, method count
-				io.ReadFull(c, make([]byte, hdr[1]))
-				c.Write([]byte{5, 0}) // no auth
-				req := make([]byte, 4)
-				io.ReadFull(c, req) // version, cmd, rsv, atyp
-				if req[3] != 3 {    // domain name: the client must not resolve .onion itself
-					return
-				}
-				n := make([]byte, 1)
-				io.ReadFull(c, n)
-				name := make([]byte, n[0])
-				io.ReadFull(c, name)
-				port := make([]byte, 2)
-				io.ReadFull(c, port)
-				requested <- net.JoinHostPort(string(name), strconv.Itoa(int(binary.BigEndian.Uint16(port))))
-				up, err := net.Dial("tcp", target)
-				if err != nil {
-					c.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0})
-					return
-				}
-				defer up.Close()
-				c.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
-				go io.Copy(up, c)
-				io.Copy(c, up)
-			}(c)
-		}
-	}()
+	go acceptLoop(ln, func(c net.Conn) {
+		serveSocks(c, func(host string, port int) (string, bool) {
+			requested <- net.JoinHostPort(host, strconv.Itoa(port))
+			return target, true
+		})
+	})
 	return ln.Addr().String(), requested
 }
 
@@ -322,5 +225,82 @@ func TestTailBufferKeepsTheEnd(t *testing.T) {
 	io.WriteString(tb, "world")
 	if tb.String() != "world" {
 		t.Fatalf("tail = %q", tb.String())
+	}
+}
+
+func TestListenIsV3AndDiscardsKey(t *testing.T) {
+	ft := newFakeTor(t, "AUTH METHODS=NULL")
+	sess, err := connectTor(ft.env(), false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	svc, err := sess.Listen(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+	if svc.Key != nil {
+		t.Fatal("onion private key reached ghostshare")
+	}
+	var add string
+	for _, c := range ft.commands() {
+		if strings.HasPrefix(c, "ADD_ONION") {
+			add = c
+		}
+	}
+	for _, want := range []string{"NEW:ED25519-V3", "Flags=DiscardPK", "Port=80,127.0.0.1:"} {
+		if !strings.Contains(add, want) {
+			t.Errorf("ADD_ONION %q is missing %q", add, want)
+		}
+	}
+	if strings.Contains(add, "Detach") {
+		t.Errorf("ADD_ONION %q must not detach: the onion has to die with the session", add)
+	}
+}
+
+func TestListenRefusesReturnedKey(t *testing.T) {
+	ft := newFakeTor(t, "AUTH METHODS=NULL")
+	ft.returnKey = true
+	sess, err := connectTor(ft.env(), false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if _, err := sess.Listen(context.Background()); err == nil {
+		t.Fatal("Listen accepted a private key from Tor")
+	}
+	if n := ft.onionCount(); n != 0 {
+		t.Fatalf("%d onion(s) left after refusing the key", n)
+	}
+}
+
+func TestOnionServesAndDiesOnClose(t *testing.T) {
+	ft := newFakeTor(t, "AUTH METHODS=NULL")
+	sess, err := connectTor(ft.env(), false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sess.Listen(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "hi")
+	})}
+	go srv.Serve(svc)
+	defer srv.Close()
+
+	host := svc.ID + ".onion"
+	if err := sess.WaitReachable(context.Background(), host, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if code, body, ok := onionGet(t, ft.socksAddr(), "http://"+host+"/"); !ok || code != 200 || body != "hi" {
+		t.Fatalf("over the onion: %d %q reachable=%v", code, body, ok)
+	}
+	sess.Close()
+	time.Sleep(100 * time.Millisecond)
+	if _, _, ok := onionGet(t, ft.socksAddr(), "http://"+host+"/"); ok {
+		t.Fatal("onion still reachable after the session closed")
 	}
 }

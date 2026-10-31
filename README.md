@@ -2,15 +2,52 @@
 
 GhostShare is a Tor-only file-sharing CLI, based on QuickShare (github.com/computerguymackay/QuickShare). One command shares a file through a temporary Tor onion service and prints one `.onion` link. The link stops working after a set number of downloads or a set time. No accounts, no relay, no third-party service, and no bundled Tor.
 
-> **Status:** early development. `ghostshare <file>` currently serves one file in the foreground (one download, 24h expiry) until the download finishes or you press Ctrl-C. The background daemon, `list`, `revoke`, `stop`, and the share flags are not implemented yet.
+> **Status:** early development. Sharing, `list`, `revoke`, `stop` and `tor-status` work. QR codes (`-q`, `-o`) and `config.toml` defaults are not implemented yet.
 
 ```console
 $ ghostshare report.pdf
 warning: Tor provides anonymity, not file encryption. Anyone with this link can download the file. Encrypt sensitive files first (e.g. `age -p file && ghostshare file.age`).
+sharing report.pdf (2.1 MiB) · 1 download, expires 2026-11-01 14:02 UTC
+the recipient must open this link in Tor Browser
 http://abc...xyz.onion/q3V9x.../report.pdf
 ```
 
 The recipient opens the link in Tor Browser, the file downloads, and the link dies.
+
+The first share starts a background daemon, which connects to Tor and publishes the onion service. That can take a minute, and the progress is shown while you wait. Later shares reuse the same daemon and the same `.onion` address, each with its own token, and print a link at once. The daemon exits by itself 45 seconds after the last share ends.
+
+## Usage
+
+```text
+ghostshare <file> [flags]     share a file and print its .onion link
+ghostshare list [-j|--json]   show active shares and their current links
+ghostshare revoke <prefix>    cancel a share (a unique prefix of 6+ characters is enough)
+ghostshare stop               stop the daemon (unfinished shares are kept)
+ghostshare tor-status         report whether Tor is running, spawnable, or missing
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `-m`, `--max-downloads N` | downloads allowed (default 1; 0 = unlimited, needs `--expires`) |
+| `-e`, `--expires DURATION` | e.g. `30m`, `24h`, `7d` (default `24h`; 0 = never, needs `--max-downloads`) |
+| `-i`, `--interactive` | prompt for the options |
+| `-j`, `--json` | print `{url, token, expires_at, max_downloads}` instead of the bare link |
+| `-f`, `--watch` | follow the daemon log after sharing |
+| `--external-tor` | only use an already-running Tor; never start one |
+
+Only the link (or the JSON) goes to stdout. Everything else goes to stderr, so this works:
+
+```sh
+link=$(ghostshare build.tar.gz --json | jq -r .url)
+```
+
+A share always ends: setting both `--max-downloads 0` and `--expires 0` is refused.
+
+A completed download counts once. A broken download doesn't count, and finishing it later counts once. Resumed downloads (Range requests) and HEAD requests never count.
+
+**Restarts change the address.** After `ghostshare stop`, a crash, or a reboot, unfinished shares come back the next time the daemon starts, but at a new `.onion` address, because the onion key is never stored. Run `ghostshare list` to see their new links.
+
+State lives in `~/.ghostshare/` (or `$GHOSTSHARE_HOME`): `state.db` holds the shares, and `ghostshare.log` is the daemon log.
 
 ## Requirements
 
