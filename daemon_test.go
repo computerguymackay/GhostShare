@@ -8,8 +8,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -431,4 +434,109 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+func TestShareServerLimits(t *testing.T) {
+	srv := newShareServer(http.NotFoundHandler(), log.New(io.Discard, "", 0))
+	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
+		t.Fatalf("ReadTimeout %v, WriteTimeout %v: must be 0 so long Tor downloads aren't cut off", srv.ReadTimeout, srv.WriteTimeout)
+	}
+	if srv.ReadHeaderTimeout < 15*time.Second || srv.IdleTimeout == 0 || srv.MaxHeaderBytes == 0 || srv.MaxHeaderBytes > 64<<10 {
+		t.Fatalf("limits: header %v, idle %v, max header %d", srv.ReadHeaderTimeout, srv.IdleTimeout, srv.MaxHeaderBytes)
+	}
+}
+
+// startShareServer runs newShareServer on a loopback port with a short
+// header timeout.
+func startShareServer(t *testing.T, headerTimeout time.Duration, h http.Handler) string {
+	t.Helper()
+	defer func(d time.Duration) { shareReadHeaderTimeout = d }(shareReadHeaderTimeout)
+	shareReadHeaderTimeout = headerTimeout
+	srv := newShareServer(h, log.New(io.Discard, "", 0))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return ln.Addr().String()
+}
+
+// closedWithin reports whether the server closes c within d.
+func closedWithin(c net.Conn, d time.Duration) bool {
+	c.SetReadDeadline(time.Now().Add(d))
+	_, err := io.Copy(io.Discard, c)
+	var ne net.Error
+	return !(errors.As(err, &ne) && ne.Timeout())
+}
+
+func TestSlowHeadersAreDisconnected(t *testing.T) {
+	addr := startShareServer(t, 300*time.Millisecond, http.NotFoundHandler())
+
+	// Headers that never finish.
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	io.WriteString(c, "GET / HTTP/1.1\r\nHost: x\r\n")
+	if !closedWithin(c, 3*time.Second) {
+		t.Fatal("a client with unfinished headers was not disconnected")
+	}
+
+	// A slowloris trickling one header byte at a time.
+	c2, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, b := range []byte("GET / HTTP/1.1\r\nHost: x\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+			if _, err := c2.Write([]byte{b}); err != nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+	start := time.Now()
+	if !closedWithin(c2, 3*time.Second) {
+		t.Fatal("a slowloris client was not disconnected")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("slowloris disconnected only after %v with a 300ms header timeout", d)
+	}
+	c2.Close()
+	<-done
+}
+
+func TestPromptHeadersAreServed(t *testing.T) {
+	addr := startShareServer(t, 300*time.Millisecond, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(600 * time.Millisecond) // a slow response is fine: no WriteTimeout
+		io.WriteString(w, "ok")
+	}))
+	resp, err := http.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "ok" {
+		t.Fatalf("got %d %q", resp.StatusCode, body)
+	}
+}
+
+func TestOversizedHeadersAreRejected(t *testing.T) {
+	addr := startShareServer(t, 5*time.Second, http.NotFoundHandler())
+	req, _ := http.NewRequest("GET", "http://"+addr+"/", nil)
+	req.Header.Set("X-Big", strings.Repeat("a", 64<<10))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("64 KiB header: %d, want 431", resp.StatusCode)
+	}
 }

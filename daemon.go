@@ -247,12 +247,7 @@ func (d *Daemon) publishShare(sh Share) (string, error) {
 		return "", err
 	}
 	so := &shareOnion{host: ln.ID + ".onion", ln: ln}
-	so.srv = &http.Server{
-		Handler:           d.onionHandler(sh.Token),
-		ReadHeaderTimeout: 15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		ErrorLog:          d.log,
-	}
+	so.srv = newShareServer(d.onionHandler(sh.Token), d.log)
 	d.onionsMu.Lock()
 	if d.onionsClosed {
 		d.onionsMu.Unlock()
@@ -274,6 +269,31 @@ func (d *Daemon) publishShare(sh Share) (string, error) {
 	}
 	d.log.Printf("share %s is online on its own onion service", shortToken(sh.Token))
 	return so.host, nil
+}
+
+// HTTP limits for each share's server. There is deliberately no
+// ReadTimeout or WriteTimeout: a large download over Tor can legitimately
+// take hours, and a whole-response deadline would cut it off.
+var (
+	shareReadHeaderTimeout = 20 * time.Second // generous, for Tor latency
+	shareIdleTimeout       = 60 * time.Second
+)
+
+// shareMaxHeaderBytes is plenty for a browser GET and far below Go's 1 MiB
+// default, so a client can't make the daemon buffer large headers.
+const shareMaxHeaderBytes = 16 << 10
+
+// newShareServer is the HTTP server for one share's onion. A client that
+// doesn't finish sending its headers within shareReadHeaderTimeout (for
+// example, a slowloris trickling bytes) is disconnected.
+func newShareServer(h http.Handler, logger *log.Logger) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: shareReadHeaderTimeout,
+		IdleTimeout:       shareIdleTimeout,
+		MaxHeaderBytes:    shareMaxHeaderBytes,
+		ErrorLog:          logger,
+	}
 }
 
 // onionHandler serves one share's onion. Only that share's token works
