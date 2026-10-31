@@ -1,4 +1,4 @@
-module github.com/computerguymackay/GhostShare
+module github.com/computerguymackay/ghostshare
 
 go 1.26.0
 

@@ -32,11 +32,13 @@ Installing Tor:
 ## Install
 
 ```sh
+CGO_ENABLED=0 go install github.com/computerguymackay/ghostshare@latest
+# or, from a checkout:
 git clone https://github.com/computerguymackay/GhostShare.git && cd GhostShare
 CGO_ENABLED=0 go build -o ghostshare . && sudo mv ghostshare /usr/local/bin/
 ```
 
-It builds as a single static binary: pure Go, no cgo, no bundled Tor. (`go install github.com/computerguymackay/GhostShare@latest` also works, but names the binary `GhostShare`.)
+It builds as a single static binary: pure Go, no cgo, no bundled Tor.
 
 Check that GhostShare can find Tor:
 

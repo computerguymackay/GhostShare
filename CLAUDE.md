@@ -240,6 +240,8 @@ invariants that make this tool worth existing. · If a change makes
 GhostShare diverge from QuickShare for no Tor-specific reason — stop. 
 Sibling projects should stay siblings. --- Naming Conventions · 
 Binary: ghostshare · Repo: github.com/computerguymackay/GhostShare · 
+Module path: github.com/computerguymackay/ghostshare (lowercase, like 
+QuickShare's, so `go install` produces a binary named ghostshare) · 
 Sibling repo: github.com/computerguymackay/QuickShare · Config dir: 
 ~/.ghostshare/ · Env vars: GHOSTSHARE_HOME, GHOSTSHARE_GRACE, 
 GHOSTSHARE_TICK, GHOSTSHARE_TOR_TEST, GHOSTSHARE_TOR_CONTROL, 
