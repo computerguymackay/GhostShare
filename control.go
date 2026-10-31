@@ -1,8 +1,8 @@
 // Ported from QuickShare (github.com/computerguymackay/QuickShare).
 //
-// [diverges from QuickShare] DaemonStatus reports the onion address, Tor
-// mode and startup progress instead of bind/addr/TLS, because the daemon
-// takes a while to become reachable over Tor.
+// [diverges from QuickShare] DaemonStatus reports Tor mode and startup
+// progress instead of bind/addr/TLS. Each share has its own onion, so
+// add-share and list return links, and add-share may take minutes.
 
 package main
 
@@ -29,32 +29,40 @@ type ctrlRequest struct {
 
 type DaemonStatus struct {
 	PID        int    `json:"pid"`
-	Ready      bool   `json:"ready"`       // the onion service is up and reachable
+	Ready      bool   `json:"ready"`       // connected to Tor and accepting shares
 	Phase      string `json:"phase"`       // what the daemon is doing while not ready
-	Onion      string `json:"onion"`       // "<id>.onion" once ready
 	TorSpawned bool   `json:"tor_spawned"` // we started Tor (vs. using a running one)
 	Active     int    `json:"active"`
+	Onions     int    `json:"onions"` // onion services currently published
 	Version    string `json:"version"`
 }
 
 type ctrlResponse struct {
-	OK     bool          `json:"ok"`
-	Error  string        `json:"error,omitempty"`
-	Status *DaemonStatus `json:"status,omitempty"`
-	Share  *Share        `json:"share,omitempty"`
-	Shares []Share       `json:"shares,omitempty"`
+	OK     bool              `json:"ok"`
+	Error  string            `json:"error,omitempty"`
+	Status *DaemonStatus     `json:"status,omitempty"`
+	Share  *Share            `json:"share,omitempty"`
+	Shares []Share           `json:"shares,omitempty"`
+	URL    string            `json:"url,omitempty"`  // add-share: the new share's link
+	URLs   map[string]string `json:"urls,omitempty"` // list: token -> current link
 }
 
 // errDaemonDown means nothing answered on the control channel.
 var errDaemonDown = errors.New("daemon is not running")
 
 func ctrlCall(p Paths, req ctrlRequest) (ctrlResponse, error) {
+	return ctrlCallTimeout(p, req, 10*time.Second)
+}
+
+// ctrlCallTimeout is ctrlCall for requests that can take longer, such as
+// add-share, which waits for the share's onion to be reachable.
+func ctrlCallTimeout(p Paths, req ctrlRequest, timeout time.Duration) (ctrlResponse, error) {
 	conn, key, err := dialControl(p)
 	if err != nil {
 		return ctrlResponse{}, errDaemonDown
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(timeout))
 	req.Key = key
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return ctrlResponse{}, errDaemonDown

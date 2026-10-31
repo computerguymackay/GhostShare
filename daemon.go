@@ -1,10 +1,12 @@
 // Ported from QuickShare (github.com/computerguymackay/QuickShare).
 //
 // [diverges from QuickShare]
-//   - The daemon serves over a Tor onion service (tor.go) instead of a TCP
-//     listener. Tor can take a minute to start, so the control socket opens
-//     first and reports progress, and the auto-shutdown timer only runs once
-//     the onion is reachable.
+//   - Every share is served on its own Tor onion service (tor.go) instead
+//     of one TCP listener, so shares can't be linked to each other. A
+//     share's onion is removed from Tor as soon as the share ends.
+//   - Tor can take a while to start, so the control socket opens first and
+//     reports progress, and the auto-shutdown timer only runs once Tor is
+//     connected. Adding a share waits until its onion is reachable.
 //   - Revoke marks a share revoked instead of deleting it.
 //   - QuickShare's spawn.go (ensureDaemon and helpers) is at the end of this
 //     file, because CLAUDE.md's layout has no spawn.go.
@@ -34,7 +36,7 @@ type DaemonOptions struct {
 	Tor          torEnv        // where to find Tor
 	Grace        time.Duration // wait this long with no active shares before exiting
 	Tick         time.Duration // how often to check for expiry
-	OnionTimeout time.Duration // how long Tor may take to publish the onion
+	OnionTimeout time.Duration // how long Tor may take to publish one onion
 }
 
 func defaultDaemonOptions() DaemonOptions {
@@ -46,9 +48,19 @@ func defaultDaemonOptions() DaemonOptions {
 	}
 }
 
-// daemonStartTimeout is how long a CLI waits for a new daemon to be ready:
-// Tor bootstrap, onion publication, and the reachability check.
-const daemonStartTimeout = 4 * time.Minute
+const (
+	// daemonStartTimeout is how long a CLI waits for a new daemon to
+	// connect to Tor (which includes starting tor, if needed).
+	daemonStartTimeout = 2 * time.Minute
+
+	// shareWaitTimeout is how long a CLI waits for a new share's onion to
+	// be published and reachable. It covers Tor's bootstrap on first use.
+	shareWaitTimeout = 5 * time.Minute
+
+	// drainTimeout is how long downloads already in progress may continue
+	// after their share ends and its onion is removed.
+	drainTimeout = time.Hour
+)
 
 func envDuration(name string, def time.Duration) time.Duration {
 	if v := os.Getenv(name); v != "" {
@@ -68,14 +80,19 @@ type Daemon struct {
 
 	store   *Store
 	fs      *FileServer
+	tor     *torSession
+	runCtx  context.Context
 	ctrlKey string
 	session string // onion_session id: diagnostic only, never the key
 
 	stateMu    sync.Mutex
 	ready      bool
 	phase      string
-	onion      string
 	torSpawned bool
+
+	onionsMu     sync.Mutex
+	onions       map[string]*shareOnion // by share token
+	onionsClosed bool
 
 	mu         sync.Mutex
 	graceTimer *time.Timer
@@ -84,8 +101,16 @@ type Daemon struct {
 	stop     chan struct{}
 }
 
+// shareOnion is one share's own onion service and the HTTP server on it.
+type shareOnion struct {
+	host string
+	ln   *onionListener
+	srv  *http.Server
+}
+
 func newDaemon(p Paths, opt DaemonOptions, logger *log.Logger) *Daemon {
-	return &Daemon{p: p, opt: opt, log: logger, stop: make(chan struct{}), phase: "starting"}
+	return &Daemon{p: p, opt: opt, log: logger, stop: make(chan struct{}),
+		phase: "starting", onions: map[string]*shareOnion{}}
 }
 
 // Run serves until ctx is cancelled, a stop command arrives, or no
@@ -118,9 +143,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for _, sh := range removed {
 		d.log.Printf("dropped %s on startup (%s)", shortToken(sh.Token), deadReason(sh, now))
 	}
-	if n, _ := d.store.CountActive(now); n > 0 {
-		d.log.Printf("restored %d share(s); they get this session's new onion address", n)
-	}
 
 	sid, err := newToken()
 	if err != nil {
@@ -145,12 +167,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}()
 
-	d.log.Printf("daemon started pid=%s session=%s", pid, d.session)
-	go d.serveControl(cl)
-
-	// A stop request or signal also cuts a slow Tor startup short.
+	// A stop request or signal also cuts slow onion publication short.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	d.runCtx = runCtx
 	go func() {
 		select {
 		case <-d.stop:
@@ -159,62 +179,44 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}()
 
+	d.log.Printf("daemon started pid=%s session=%s", pid, d.session)
+	go d.serveControl(cl)
+
 	d.setPhase("connecting to Tor")
 	sess, err := connectTor(d.opt.Tor, !d.opt.ExternalTor, logWriter{d.log})
 	if err != nil {
 		return err
 	}
+	d.tor = sess
 	defer func() {
 		if err := sess.Close(); err != nil {
 			d.log.Printf("tor shutdown: %v", err)
 		}
 	}()
+	defer d.closeAllOnions() // runs before the Tor session closes
+
 	d.stateMu.Lock()
 	d.torSpawned = sess.spawned
+	d.ready, d.phase = true, "ready"
 	d.stateMu.Unlock()
+	d.log.Printf("connected to Tor; ready for shares")
 
-	d.setPhase("publishing the onion service (this can take a minute)")
-	lctx, lcancel := context.WithTimeout(runCtx, d.opt.OnionTimeout)
-	onion, err := sess.Listen(lctx)
-	lcancel()
-	if err != nil {
-		if runCtx.Err() != nil {
-			d.log.Printf("stopped during startup")
-			return nil
+	// Restored shares each get a new onion address.
+	if live, err := d.liveShares(); err == nil && len(live) > 0 {
+		d.log.Printf("restoring %d share(s), each on a new onion address", len(live))
+		for _, sh := range live {
+			go func(sh Share) {
+				if _, err := d.publishShare(sh); err != nil && runCtx.Err() == nil {
+					d.log.Printf("share %s could not be restored: %v", shortToken(sh.Token), err)
+				}
+			}(sh)
 		}
-		return err
 	}
-	defer onion.Close()
-	host := onion.ID + ".onion"
-
-	srv := &http.Server{
-		Handler:           d.fs,
-		ReadHeaderTimeout: 15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		ErrorLog:          d.log,
-	}
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- srv.Serve(onion) }()
-
-	d.setPhase("checking that the onion service is reachable")
-	if err := sess.WaitReachable(runCtx, host, healthTimeout); err != nil {
-		srv.Close()
-		if runCtx.Err() != nil {
-			d.log.Printf("stopped during startup")
-			return nil
-		}
-		return err
-	}
-	d.stateMu.Lock()
-	d.ready, d.onion, d.phase = true, host, "ready"
-	d.stateMu.Unlock()
-	d.log.Printf("onion service ready at %s (session %s)", host, d.session)
 
 	ticker := time.NewTicker(d.opt.Tick)
 	defer ticker.Stop()
 	d.evaluate()
 
-	var exitErr error
 loop:
 	for {
 		select {
@@ -223,9 +225,6 @@ loop:
 			break loop
 		case <-d.stop:
 			break loop
-		case err := <-srvErr:
-			exitErr = fmt.Errorf("http server: %w", err)
-			break loop
 		case <-ticker.C:
 			d.prune()
 			d.evaluate()
@@ -233,13 +232,126 @@ loop:
 	}
 
 	cl.Close()
-	sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer scancel()
-	if err := srv.Shutdown(sctx); err != nil {
-		srv.Close()
+	d.closeAllOnions()
+	d.log.Printf("daemon stopped; all onion services are gone")
+	return nil
+}
+
+// publishShare gives a share its own onion service and waits until it
+// answers through Tor. It returns the onion host.
+func (d *Daemon) publishShare(sh Share) (string, error) {
+	lctx, cancel := context.WithTimeout(d.runCtx, d.opt.OnionTimeout)
+	defer cancel()
+	ln, err := d.tor.Listen(lctx)
+	if err != nil {
+		return "", err
 	}
-	d.log.Printf("daemon stopped; the onion service is gone")
-	return exitErr
+	so := &shareOnion{host: ln.ID + ".onion", ln: ln}
+	so.srv = &http.Server{
+		Handler:           d.onionHandler(sh.Token),
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		ErrorLog:          d.log,
+	}
+	d.onionsMu.Lock()
+	if d.onionsClosed {
+		d.onionsMu.Unlock()
+		ln.Close()
+		return "", errors.New("the daemon is shutting down")
+	}
+	d.onions[sh.Token] = so
+	d.onionsMu.Unlock()
+	go so.srv.Serve(ln)
+
+	if err := d.tor.WaitReachable(d.runCtx, so.host, healthTimeout); err != nil {
+		d.endShareOnion(sh.Token, true)
+		return "", err
+	}
+	// The share may have been revoked or expired while we waited.
+	if cur, err := d.store.Get(sh.Token); err != nil || !cur.Active(time.Now()) {
+		d.endShareOnion(sh.Token, true)
+		return "", errors.New("the share ended before its onion service was ready")
+	}
+	d.log.Printf("share %s is online on its own onion service", shortToken(sh.Token))
+	return so.host, nil
+}
+
+// onionHandler serves one share's onion. Only that share's token works
+// there; anything else gets the same 410 as an unknown link.
+func (d *Daemon) onionHandler(token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if got != token {
+			http.Error(w, "this link has expired or does not exist", http.StatusGone)
+			return
+		}
+		d.fs.ServeHTTP(w, r)
+		if sh, err := d.store.Get(token); err != nil || !sh.Active(time.Now()) {
+			go d.endShareOnion(token, false)
+		}
+	})
+}
+
+// endShareOnion removes a share's onion from Tor. With hard set, open
+// connections are cut; otherwise downloads in progress may finish.
+func (d *Daemon) endShareOnion(token string, hard bool) {
+	d.onionsMu.Lock()
+	so := d.onions[token]
+	delete(d.onions, token)
+	d.onionsMu.Unlock()
+	if so == nil {
+		return
+	}
+	if hard {
+		so.srv.Close()
+	} else {
+		// Shutdown stops accepting at once, then waits for active downloads.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			defer cancel()
+			if so.srv.Shutdown(ctx) != nil {
+				so.srv.Close()
+			}
+		}()
+	}
+	so.ln.Close()
+	d.log.Printf("share %s: onion service removed", shortToken(token))
+}
+
+func (d *Daemon) closeAllOnions() {
+	d.onionsMu.Lock()
+	d.onionsClosed = true
+	all := d.onions
+	d.onions = map[string]*shareOnion{}
+	d.onionsMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, so := range all {
+		wg.Add(1)
+		go func(so *shareOnion) {
+			defer wg.Done()
+			if so.srv.Shutdown(ctx) != nil {
+				so.srv.Close()
+			}
+			so.ln.Close()
+		}(so)
+	}
+	wg.Wait()
+}
+
+// onionURLs maps each share token to its current link.
+func (d *Daemon) onionURLs(shares []Share) map[string]string {
+	d.onionsMu.Lock()
+	defer d.onionsMu.Unlock()
+	urls := map[string]string{}
+	for _, sh := range shares {
+		if so, ok := d.onions[sh.Token]; ok {
+			urls[sh.Token] = shareURL(so.host, sh)
+		}
+	}
+	return urls
 }
 
 func (d *Daemon) setPhase(phase string) {
@@ -270,6 +382,7 @@ func (d *Daemon) prune() {
 	}
 	for _, sh := range removed {
 		d.log.Printf("share %s ended (%s)", shortToken(sh.Token), deadReason(sh, now))
+		d.endShareOnion(sh.Token, false)
 	}
 }
 
@@ -300,7 +413,7 @@ func (d *Daemon) idle() bool {
 
 // evaluate starts the grace timer when idle and cancels it otherwise.
 // It runs after every request, every control change and every tick,
-// once the onion service is ready.
+// once Tor is connected.
 func (d *Daemon) evaluate() {
 	if !d.isReady() {
 		return
@@ -347,8 +460,19 @@ func (d *Daemon) serveControl(l net.Listener) {
 			if err := json.NewDecoder(c).Decode(&req); err != nil {
 				return
 			}
+			if req.Op == "add-share" {
+				// Publishing the share's onion can take a while.
+				c.SetDeadline(time.Now().Add(shareWaitTimeout))
+			}
 			resp := d.handleControl(req)
-			json.NewEncoder(c).Encode(resp)
+			err := json.NewEncoder(c).Encode(resp)
+			if err != nil && req.Op == "add-share" && resp.OK {
+				// Nobody received the link, so nobody can use it.
+				d.log.Printf("share %s: the CLI went away before getting its link; revoking", shortToken(resp.Share.Token))
+				d.store.Revoke(resp.Share.Token)
+				d.endShareOnion(resp.Share.Token, true)
+				d.evaluate()
+			}
 			if req.Op == "stop" && resp.OK {
 				d.shutdown("stop requested")
 			}
@@ -382,11 +506,14 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 	switch req.Op {
 	case "status":
 		n, _ := d.store.CountActive(time.Now())
+		d.onionsMu.Lock()
+		onions := len(d.onions)
+		d.onionsMu.Unlock()
 		d.stateMu.Lock()
 		defer d.stateMu.Unlock()
 		return ctrlResponse{OK: true, Status: &DaemonStatus{
-			PID: os.Getpid(), Ready: d.ready, Phase: d.phase, Onion: d.onion,
-			TorSpawned: d.torSpawned, Active: n, Version: version,
+			PID: os.Getpid(), Ready: d.ready, Phase: d.phase, TorSpawned: d.torSpawned,
+			Active: n, Onions: onions, Version: version,
 		}}
 
 	case "add-share":
@@ -411,14 +538,20 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 		}
 		d.log.Printf("share %s added: %s (%s)", shortToken(tok), sh.Filename, describeLimits(sh))
 		d.evaluate()
-		return ctrlResponse{OK: true, Share: &sh}
+		host, err := d.publishShare(sh)
+		if err != nil {
+			d.store.Delete(tok)
+			d.evaluate()
+			return fail("could not publish an onion service for this share: %v", err)
+		}
+		return ctrlResponse{OK: true, Share: &sh, URL: shareURL(host, sh)}
 
 	case "list":
 		live, err := d.liveShares()
 		if err != nil {
 			return fail("%v", err)
 		}
-		return ctrlResponse{OK: true, Shares: live}
+		return ctrlResponse{OK: true, Shares: live, URLs: d.onionURLs(live)}
 
 	case "revoke":
 		live, err := d.liveShares()
@@ -433,6 +566,7 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 			return fail("revoke: %v", err)
 		}
 		d.log.Printf("share %s revoked", shortToken(tok))
+		d.endShareOnion(tok, true)
 		d.evaluate()
 		return ctrlResponse{OK: true, Share: &Share{Token: tok}}
 

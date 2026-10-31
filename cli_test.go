@@ -141,15 +141,16 @@ func (e *cliEnv) reachable(t *testing.T, link string) bool {
 	return ok
 }
 
-// linkParts splits http://<onion>/<token>/<name>.
-func linkParts(t *testing.T, link string) (onion, token string) {
+// waitGone waits until a link's onion has been removed from Tor.
+func (e *cliEnv) waitGone(t *testing.T, link string) {
 	t.Helper()
-	rest, ok := strings.CutPrefix(link, "http://")
-	parts := strings.Split(rest, "/")
-	if !ok || len(parts) != 3 || !strings.HasSuffix(parts[0], ".onion") || len(parts[0]) != 56+len(".onion") {
-		t.Fatalf("%q is not an http://<v3>.onion/<token>/<file> link", link)
+	deadline := time.Now().Add(3 * time.Second)
+	for e.reachable(t, link) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still reachable", link)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	return parts[0], parts[1]
 }
 
 func TestCLIShareDownloadAndAutoStop(t *testing.T) {
@@ -171,9 +172,7 @@ func TestCLIShareDownloadAndAutoStop(t *testing.T) {
 	if code, body := e.download(t, link); code != 200 || body != "hello" {
 		t.Fatalf("download: %d %q", code, body)
 	}
-	if code, _ := e.download(t, link); code != 410 {
-		t.Fatalf("second download: %d, want 410", code)
-	}
+	e.waitGone(t, link) // the share's onion goes away once it's used up
 	e.waitDaemonGone(t, 4*time.Second)
 	if e.reachable(t, link) {
 		t.Fatal("link still reachable after the daemon exited")
@@ -248,11 +247,18 @@ func TestCLIParallelInvocationsShareOneDaemon(t *testing.T) {
 	if got := len(e.list(t)); got != n {
 		t.Fatalf("daemon has %d shares, want %d (were two daemons started?)", got, n)
 	}
-	onion, _ := linkParts(t, links[0])
+	seen := map[string]bool{}
 	for _, l := range links {
-		if o, _ := linkParts(t, l); o != onion {
-			t.Fatalf("shares use different onions (%s, %s); want one per daemon session", onion, o)
+		o, _ := linkParts(t, l)
+		if seen[o] {
+			t.Fatalf("two shares got the same onion %s; want one per share", o)
 		}
+		seen[o] = true
+	}
+	if got := e.ft.onionCount(); got != n {
+		t.Fatalf("%d onions for %d shares, want one each", got, n)
+	}
+	for _, l := range links {
 		if code, _ := e.download(t, l); code != 200 {
 			t.Fatalf("download %s: %d", l, code)
 		}
@@ -318,10 +324,14 @@ func TestCLICrashRestoresSharesOnNewOnion(t *testing.T) {
 	if code, _ := e.download(t, restored); code != 200 {
 		t.Fatalf("restored share on the new onion: %d", code)
 	}
-	newOnion, _ := linkParts(t, restored)
 	_, expTok := linkParts(t, expired)
-	if code, _ := e.download(t, "http://"+newOnion+"/"+expTok+"/file.txt"); code != 410 {
-		t.Fatalf("expired share after restart: %d, want 410", code)
+	for _, it := range items {
+		if it.Token == expTok {
+			t.Fatal("the expired share was restored")
+		}
+	}
+	if e.reachable(t, expired) {
+		t.Fatal("the expired share's old link works")
 	}
 }
 
@@ -364,9 +374,7 @@ func TestCLIRevokeWhileRunning(t *testing.T) {
 	if out, errOut, code := e.run(t, "revoke", tok[:6]); code != 0 || !strings.Contains(out, tok) {
 		t.Fatalf("revoke: %d %q %q", code, out, errOut)
 	}
-	if code, _ := e.download(t, link); code != 410 {
-		t.Fatalf("revoked link: %d, want 410", code)
-	}
+	e.waitGone(t, link)
 	if _, _, code := e.run(t, "revoke", tok[:5]); code == 0 {
 		t.Fatal("a 5-character prefix was accepted")
 	}
@@ -492,9 +500,7 @@ func TestCLIPhase4ReportPDF(t *testing.T) {
 			t.Fatalf("download %d: %d %q", i, code, body)
 		}
 	}
-	if code, _ := e.download(t, link); code != 410 {
-		t.Fatalf("fourth download: %d, want 410", code)
-	}
+	e.waitGone(t, link) // used up: the onion is removed
 }
 
 func TestCLIQRKeepsLinkOnStdout(t *testing.T) {

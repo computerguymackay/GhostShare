@@ -1,9 +1,10 @@
 # ghostshare
 
-GhostShare is a Tor-only file-sharing CLI, based on QuickShare (github.com/computerguymackay/QuickShare). One command shares a file through a temporary Tor onion service and prints one `.onion` link. The link stops working after a set number of downloads or a set time. No accounts, no relay, no third-party service, and no bundled Tor.
+GhostShare is a Tor-only file-sharing CLI, based on QuickShare (github.com/computerguymackay/QuickShare). One command shares a file through its own temporary Tor onion service and prints one `.onion` link. The link stops working after a set number of downloads or a set time, and its onion address disappears from Tor. No accounts, no relay, no third-party service, and no bundled Tor.
 
 ```console
 $ ghostshare report.pdf
+publishing a new onion service for this file (this can take a minute)…
 warning: Tor provides anonymity, not file encryption. Anyone with this link can download the file. Encrypt sensitive files first (e.g. `age -p file && ghostshare file.age`).
 sharing report.pdf (2.1 MiB) · 1 download, expires 2026-11-01 14:02 UTC
 the recipient must open this link in Tor Browser
@@ -86,13 +87,19 @@ A share always ends: setting both `--max-downloads 0` and `--expires 0` is refus
 
 A completed download counts once. A broken download doesn't count, and finishing it later counts once. Resumed downloads (Range requests) and HEAD requests never count. If two people finish downloading at the same moment on the last slot, both may succeed.
 
+When a share ends (download limit, expiry, `revoke`, or the file is deleted), its onion service is removed from Tor at once. Tor Browser then reports that the site can't be found. Downloads already in progress may finish.
+
+### One onion per file
+
+Every share gets its own `.onion` address and its own token, so two recipients can't tell that their files came from the same person, and a token only works on its own address. The cost is time: each share waits for its own onion service to be published and reachable, which usually takes 10–60 seconds. No link is printed until the onion answers through Tor.
+
 ### The daemon
 
-The first share starts a background daemon, which connects to Tor and publishes the onion service. That can take a minute; the progress is shown while you wait, and no link is printed until the onion answers through Tor. Later shares reuse the same daemon and the same `.onion` address, each with its own token, and print their link at once.
+The first share starts a background daemon, which connects to Tor (starting `tor` if needed). Later shares reuse the daemon and the same Tor, but each still gets a new onion service.
 
-The daemon exits by itself 45 seconds after the last share ends, removing the onion service. If GhostShare started Tor, that Tor is stopped too. A Tor you were already running is left alone.
+The daemon exits by itself 45 seconds after the last share ends, removing all its onion services. If GhostShare started Tor, that Tor is stopped too. A Tor you were already running is left alone.
 
-**Restarts change the address.** After `ghostshare stop`, a crash, or a reboot, unfinished shares come back the next time the daemon starts, but at a new `.onion` address, because the onion key is never stored. `ghostshare list` shows their new links.
+**Restarts change the addresses.** After `ghostshare stop`, a crash, or a reboot, unfinished shares come back the next time the daemon starts, each at a new `.onion` address, because onion keys are never stored. `ghostshare list` shows their new links.
 
 ## Configuration
 
@@ -118,9 +125,10 @@ The state directory holds `state.db` (the shares), `ghostshare.log` (the daemon 
 ## Security and privacy
 
 - **Tor is anonymity, not encryption.** The onion service hides where the file is served from, but anyone who has the link can download the file. Encrypt sensitive files first, for example with `age -p`.
-- **The link is the secret.** Each link carries a random 144-bit token. Share it only over a channel you trust.
+- **The link is the secret.** Each link has its own onion address and a random 144-bit token. Share it only over a channel you trust.
+- **Shares are unlinkable.** Different shares never share an onion address, so recipients can't connect them to each other, and a finished share's address stops answering instead of confirming you're still online.
 - **No onion keys on disk.** Tor is told to discard the onion service's private key, so GhostShare never has it and can't store it.
-- **Minimal logs.** The daemon log never records client addresses, and shows tokens only as their first 8 characters.
+- **Minimal logs.** The daemon log never records client addresses or onion addresses, and shows tokens only as their first 8 characters.
 - **Tor control access.** If your Tor runs as a system service and `tor-status` reports an authentication error, your user needs read access to Tor's auth cookie. On Debian/Ubuntu: `sudo usermod -aG debian-tor $USER`, then log out and back in.
 
 ## Building and testing
@@ -144,7 +152,7 @@ GHOSTSHARE_TOR_TEST=1 go test -tags=tortest -v ./...
 
 GhostShare is the Tor-only sibling of [QuickShare](https://github.com/computerguymackay/QuickShare). Both are by the same author.
 
-- **Transport:** QuickShare serves files over clearnet HTTP from a machine the internet can reach. GhostShare serves the same files over a temporary Tor onion service, so neither side needs a public IP or reveals one.
+- **Transport:** QuickShare serves files over clearnet HTTP from a machine the internet can reach. GhostShare serves each file over its own temporary Tor onion service, so neither side needs a public IP or reveals one.
 - **Shared model:** GhostShare inherits QuickShare's background daemon, control socket, token format, download-counting rules, flag names, and config layout. Code ported from QuickShare is marked with an attribution comment at the top of the file. GhostShare's own addition is the Tor transport (`tor.go`) and its warnings.
 - **Shared license:** both projects use the same MIT license. Neither is relicensed without the other.
 - **How fixes flow:** the two codebases are kept structurally aligned so fixes can be cherry-picked in either direction. A commit that ports a fix cites the other project. A commit that changes inherited behavior is marked `[diverges from QuickShare]`.

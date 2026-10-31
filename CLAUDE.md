@@ -43,7 +43,7 @@ Don't silently degrade. 2. Unbundled Tor. Never add go-libtor or any
 embedded-Tor dependency. Use bine to talk to a user-provided Tor 
 (running or spawned). Keep the binary small and CGO-free. 3. 
 Anonymity is the point. Never write onion private keys to disk. Never 
-log IPs. Ephemeral onion per daemon session. 4. Honesty over 
+log IPs. Ephemeral onion per share, so shares can't be linked to each other. 4. Honesty over 
 hand-waving. Tor ≠ file encryption. Always print the security 
 warning. Never claim more privacy than we deliver. 5. Small scope, 
 done well. Reject feature creep. v1 is deliberately tiny. A working 
@@ -108,7 +108,15 @@ a running Tor, leave it alone. No zombie processes, no leaked onion
 descriptors. 5. --external-tor is the default path, not an 
 afterthought. The flag exists to make the intent explicit and to help 
 with testing, but the code path it exercises is the primary one. 6. 
-One onion per daemon session in v1. Per-share onions are v2. --- 
+One onion per share. Every share gets its own fresh v3 onion address 
+plus its own token (defense in depth), so two recipients can't tell 
+their files came from the same person. A token only works on its own 
+onion. When a share ends (download limit, expiry, revoke, file gone) 
+its onion is removed from Tor at once; downloads already in progress 
+may finish. One Tor process (attached or spawned) hosts all of a 
+daemon's onions. Cost, accepted on purpose: every share waits for its 
+own onion to publish (~10-60s), not just the first. (Changed 
+2026-10-31 from "one onion per daemon session".) --- 
 Security & Privacy Invariants · Never write onion private keys to 
 disk. · Never log full tokens. First 8 characters only (same policy 
 as QuickShare). · Never add a clearnet fallback. · Never claim the 
@@ -145,14 +153,16 @@ tor-status is new and worth adding: it lets users debug "why doesn't
 ghostshare work" without reading logs. Output should say clearly 
 whether Tor is running, spawnable, or missing, and what to do. --- 
 Daemon Lifecycle (inherits QuickShare's model) 1. ghostshare <file> 
-starts the daemon if not running, hands off the share, exits. 2. One 
-daemon serves all shares in a session. All shares use the same onion 
-address (different tokens). 3. Daemon auto-shuts down after 45s 
-(GHOSTSHARE_GRACE) with no active shares — closing the onion service, 
+starts the daemon if not running, hands off the share, waits for that 
+share's onion to be reachable, prints the link, exits. 2. One daemon 
+serves all shares in a session, each on its own onion address with 
+its own token. 3. Daemon auto-shuts down after 45s 
+(GHOSTSHARE_GRACE) with no active shares — closing all onion services, 
 and killing spawned Tor (but not attached Tor). 4. Expiry checked 
 every 10s (GHOSTSHARE_TICK). 5. ghostshare stop shuts down 
 immediately but preserves unfinished shares in DB. 6. On restart, 
-surviving shares get a new onion address. Documented behavior — not a 
+each surviving share gets a new onion address (`ghostshare list` shows 
+the new links). Documented behavior — not a 
 bug. 7. Lock file at ~/.ghostshare/daemon.lock prevents double-start. 
 8. Control channel: Unix domain socket (Windows: loopback TCP + key). 
 --- Data Model SQLite at ~/.ghostshare/state.db. This schema differs 
@@ -171,7 +181,7 @@ restart, surviving shares get a new onion address. --- Explicit
 Non-Goals (v1) If a user asks for any of these, say "that's v2" and 
 move on: · Clearnet fallback. (Standalone is the whole point.) · 
 Receive/upload mode. · Password gate on top of token. · Directory/tar 
-sharing. · GUI. · Per-share ephemeral onions. · Persistent onion 
+sharing. · GUI. · Persistent onion 
 addresses. · Bundled Tor. (Violates the small-binary invariant.) · 
 Windows CI (manual testing only). · Removing QuickShare attribution 
 or relicensing without the original author's consent. --- Testing 
@@ -220,8 +230,9 @@ from QuickShare, with tor.go swapped in for the listener · Match
 QuickShare's daemon model exactly (lock file, control socket, 
 auto-stop, restore) unless a Tor-specific reason forces a change — 
 and if so, note it [diverges from QuickShare] · Verify: two shares 
-reuse one daemon; list/revoke/stop all work; restart restores shares 
-with a new onion Phase 4 — UX & Polish · qr.go, config.go, security 
+reuse one daemon but get different onions; a share's onion disappears 
+when the share ends; list/revoke/stop all work; restart restores shares 
+with new onions Phase 4 — UX & Polish · qr.go, config.go, security 
 warnings, README polish · Verify: ghostshare report.pdf -m 3 -e 2h -q 
 works end-to-end; --json is pipe-clean; --help and --version include 
 the QuickShare attribution string --- When in Doubt · Reuse 

@@ -249,3 +249,14 @@ func onionGet(t *testing.T, socks, link string) (code int, body string, ok bool)
 	resp.Body.Close()
 	return resp.StatusCode, string(b), true
 }
+
+// linkParts splits http://<onion>/<token>/<name>.
+func linkParts(t *testing.T, link string) (onion, token string) {
+	t.Helper()
+	rest, ok := strings.CutPrefix(link, "http://")
+	parts := strings.Split(rest, "/")
+	if !ok || len(parts) != 3 || !strings.HasSuffix(parts[0], ".onion") || len(parts[0]) != 56+len(".onion") {
+		t.Fatalf("%q is not an http://<v3>.onion/<token>/<file> link", link)
+	}
+	return parts[0], parts[1]
+}

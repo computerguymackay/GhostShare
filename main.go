@@ -8,8 +8,8 @@
 //   - No --wan, --bind, --tls or --allow-forever (Tor replaces the first
 //     three; the last is out of scope for v1). Adds --external-tor and the
 //     tor-status command.
-//   - The share link uses the daemon's .onion address, and `list` shows each
-//     share's current link, since restarts change the onion address.
+//   - Every share gets its own .onion address, and `list` shows each share's
+//     current link, since restarts change the addresses.
 //   - Every share prints the Tor security warning and the Tor Browser note.
 
 package main
@@ -240,19 +240,20 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		warnf(stderr, "the daemon is already running on a Tor it started; --external-tor applies after `ghostshare stop`")
 	}
 	if spawned && st.Active > 0 {
-		fmt.Fprintf(stderr, "%d earlier share(s) are back online at this session's new .onion address; `ghostshare list` shows their links\n", st.Active)
+		fmt.Fprintf(stderr, "%d earlier share(s) are coming back online, each at a new .onion address; `ghostshare list` shows their links\n", st.Active)
 	}
 
 	var expiresAt int64
 	if expires > 0 {
 		expiresAt = time.Now().Add(expires).Unix()
 	}
-	resp, err := ctrlCall(p, ctrlRequest{Op: "add-share", Path: path, ExpiresAt: expiresAt, MaxDownloads: maxDl})
+	fmt.Fprintln(stderr, "publishing a new onion service for this file (this can take a minute)…")
+	resp, err := ctrlCallTimeout(p, ctrlRequest{Op: "add-share", Path: path, ExpiresAt: expiresAt, MaxDownloads: maxDl}, shareWaitTimeout)
 	if err != nil {
 		return errorf(stderr, "add share: %v", err)
 	}
 	sh := *resp.Share
-	link := shareURL(st.Onion, sh)
+	link := resp.URL
 
 	fmt.Fprintln(stderr, securityWarning)
 
@@ -401,7 +402,7 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		return errorf(stderr, "%v", err)
 	}
 	var shares []Share
-	onion := ""
+	var urls map[string]string
 	running := true
 	resp, err := ctrlCall(p, ctrlRequest{Op: "list"})
 	switch {
@@ -415,17 +416,11 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		return errorf(stderr, "%v", err)
 	default:
 		shares = resp.Shares
-		if st, err := daemonStatus(p); err == nil && st.Ready {
-			onion = st.Onion
-		}
+		urls = resp.URLs
 	}
 	items := make([]listItem, 0, len(shares))
 	for _, sh := range shares {
-		it := listItem{Share: sh}
-		if onion != "" {
-			it.URL = shareURL(onion, sh)
-		}
-		items = append(items, it)
+		items = append(items, listItem{Share: sh, URL: urls[sh.Token]})
 	}
 
 	if *jsonOut {
@@ -433,7 +428,7 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if !running && len(items) > 0 {
-		fmt.Fprintln(stderr, "daemon is not running: these shares are offline until the next `ghostshare <file>` starts it, and they will get a new .onion address")
+		fmt.Fprintln(stderr, "daemon is not running: these shares are offline until the next `ghostshare <file>` starts it, and each will get a new .onion address")
 	}
 	if len(items) == 0 {
 		fmt.Fprintln(stderr, "no active shares")
@@ -448,7 +443,11 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 			exp = "in " + humanDuration(time.Unix(it.ExpiresAt, 0).Sub(now))
 		}
 		link := it.URL
-		if link == "" {
+		switch {
+		case link != "":
+		case running:
+			link = "(publishing)"
+		default:
 			link = "(offline)"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", it.Token, it.Path, countString(it.Share), exp, link)
@@ -550,7 +549,7 @@ func cmdStop(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "daemon stopped (pid %d)\n", st.PID)
 	if st.Active > 0 {
-		fmt.Fprintf(stderr, "%d share(s) kept: they come back online, at a new .onion address, next time the daemon starts. Use `ghostshare revoke <prefix>` to cancel them.\n", st.Active)
+		fmt.Fprintf(stderr, "%d share(s) kept: they come back online, each at a new .onion address, next time the daemon starts. Use `ghostshare revoke <prefix>` to cancel them.\n", st.Active)
 	}
 	return 0
 }
