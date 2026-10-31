@@ -67,7 +67,7 @@ go test -race ./...
 GHOSTSHARE_TOR_TEST=1 go test -tags=tortest ./...
 # Shorten daemon timers for local testing
 GHOSTSHARE_GRACE=2s GHOSTSHARE_TICK=1s go test ./... ``` Build 
-expectations: seconds, not minutes. Binary ~5 MB. If a change makes 
+expectations: seconds, not minutes. Binary ~16 MB (~11 MB stripped with -ldflags='-s -w'); pure-Go SQLite and net/http account for most of it, and QuickShare is ~17 MB. If a change makes 
 the build slow or requires CGO, that's a regression — stop and fix 
 it. --- Architecture ``` GhostShare/ ├── main.go # CLI entry, flag 
 parsing, dispatch ├── config.go # ~/.ghostshare/config.toml load/save 
@@ -98,7 +98,7 @@ Tor Integration Rules 1. Detect, then spawn. On startup, in order:
    error with install instructions (Debian/Ubuntu, Fedora, macOS 
    Homebrew, Windows Tor Expert Bundle) and exit non-zero. Do not 
    fall back to clearnet.
-2. Always v3 onions. tor.EnableV3(true) on every launch. v2 is dead. 
+2. Always v3 onions. tor.ListenConf{Version3: true, DiscardKey: true} on every Listen (bine v0.2.0 has no EnableV3). v2 is dead. 
 3. Health-check before printing a link. After creating the onion, 
 poll it through Tor's SOCKS proxy (127.0.0.1:9050) until it responds, 
 timeout ~30s. Never print a link that doesn't yet resolve. 4. 
@@ -155,9 +155,12 @@ immediately but preserves unfinished shares in DB. 6. On restart,
 surviving shares get a new onion address. Documented behavior — not a 
 bug. 7. Lock file at ~/.ghostshare/daemon.lock prevents double-start. 
 8. Control channel: Unix domain socket (Windows: loopback TCP + key). 
---- Data Model SQLite at ~/.ghostshare/state.db, mirroring 
-QuickShare's schema with one addition (onion_session, for diagnostics 
-only — never the key): ```sql CREATE TABLE shares (
+--- Data Model SQLite at ~/.ghostshare/state.db. This schema differs 
+from QuickShare's (token, path, created, expires_at, max_downloads, 
+count): columns are renamed, filename and revoked are added, NULL means 
+"never expires", and onion_session is for diagnostics only — never the 
+key. store.go keeps QuickShare's Go API so callers stay portable 
+[diverges from QuickShare]: ```sql CREATE TABLE shares (
   token TEXT PRIMARY KEY, file_path TEXT NOT NULL, filename TEXT NOT 
   NULL, expires_at INTEGER, -- unix ts; NULL = never max_downloads 
   INTEGER, -- 0 = unlimited downloads INTEGER DEFAULT 0, created_at 
