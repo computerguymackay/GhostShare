@@ -1,4 +1,7 @@
 // Ported from QuickShare (github.com/computerguymackay/QuickShare).
+//
+// [diverges from QuickShare] Adds Files, where metadata-stripped copies of
+// shared files are kept.
 
 package main
 
@@ -15,6 +18,7 @@ type Paths struct {
 	Home       string
 	Config     string
 	DB         string
+	Files      string // metadata-stripped copies, one per share token
 	Sock       string // Unix control socket
 	CtrlAddr   string // Windows: file holding loopback address + key
 	PID        string
@@ -47,6 +51,7 @@ func resolvePaths() (Paths, error) {
 		Home:       home,
 		Config:     filepath.Join(home, "config.toml"),
 		DB:         filepath.Join(home, "state.db"),
+		Files:      filepath.Join(home, "files"),
 		Sock:       sock,
 		CtrlAddr:   filepath.Join(home, "control.addr"),
 		PID:        filepath.Join(home, "daemon.pid"),

@@ -12,6 +12,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -586,19 +588,243 @@ func TestCLIInteractive(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"GHOSTSHARE_HOME="+e.home, "GHOSTSHARE_GRACE=1s", "GHOSTSHARE_TICK=200ms",
 		"GHOSTSHARE_TOR_CONTROL="+e.controlAddr, "PATH="+e.path)
-	cmd.Stdin = strings.NewReader("5\n90m\ny\n")
+	cmd.Stdin = strings.NewReader("5\n90m\nn\ny\n") // max, expiry, strip metadata, QR
 	var o, er bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &o, &er
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("%v: %s", err, er.String())
 	}
 	var v struct {
-		MaxDownloads int `json:"max_downloads"`
+		MaxDownloads     int  `json:"max_downloads"`
+		MetadataStripped bool `json:"metadata_stripped"`
 	}
-	if err := json.Unmarshal(o.Bytes(), &v); err != nil || v.MaxDownloads != 5 {
+	if err := json.Unmarshal(o.Bytes(), &v); err != nil || v.MaxDownloads != 5 || v.MetadataStripped {
 		t.Fatalf("interactive answers not applied: %q %v", o.String(), err)
+	}
+	for _, want := range []string{"Strip metadata (EXIF, GPS, author, etc.) before sharing? [Y/n]", "metadata is not being removed"} {
+		if !strings.Contains(er.String(), want) {
+			t.Errorf("stderr is missing %q:\n%s", want, er.String())
+		}
 	}
 	if !strings.Contains(er.String(), "Max downloads") || !strings.Contains(er.String(), "█") {
 		t.Fatalf("prompts or QR missing from stderr:\n%s", er.String())
 	}
+}
+
+// ---- Metadata stripping, end to end ----
+
+type shareJSON struct {
+	URL              string `json:"url"`
+	Token            string `json:"token"`
+	MetadataStripped bool   `json:"metadata_stripped"`
+}
+
+func (e *cliEnv) shareJSON(t *testing.T, file string, extra ...string) (shareJSON, string) {
+	t.Helper()
+	out, errOut, code := e.run(t, append([]string{file, "-j"}, extra...)...)
+	if code != 0 {
+		t.Fatalf("share failed (%d): %s", code, errOut)
+	}
+	var v shareJSON
+	dec := json.NewDecoder(strings.NewReader(out))
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		t.Fatalf("stdout is not exactly one JSON object: %q (%v)", out, err)
+	}
+	return v, errOut
+}
+
+func (e *cliEnv) fetch(t *testing.T, link string) (*http.Response, []byte) {
+	t.Helper()
+	resp, body, ok := onionFetch(t, e.ft.socksAddr(), link)
+	if !ok {
+		t.Fatalf("%s is not reachable", link)
+	}
+	return resp, body
+}
+
+func writeFixture(t *testing.T, name string, data []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func (e *cliEnv) copyFor(token string) string { return filepath.Join(e.home, "files", token) }
+
+func (e *cliEnv) waitNoCopy(t *testing.T, token string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for fileExists(e.copyFor(token)) {
+		if time.Now().After(deadline) {
+			t.Fatalf("stripped copy for %s… still exists", token[:8])
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestCLIStripsMetadataByDefault(t *testing.T) {
+	e := newCLIEnv(t)
+	data := jpegFixture(t, 6)
+	photo := writeFixture(t, "holiday photo.jpg", data)
+	v, errOut := e.shareJSON(t, photo)
+	if !v.MetadataStripped {
+		t.Fatal("metadata_stripped = false for a JPEG")
+	}
+	if strings.Contains(errOut, "warning: can't") || strings.Contains(errOut, "warning: couldn't") || strings.Contains(errOut, "not being removed") {
+		t.Errorf("unexpected metadata warning:\n%s", errOut)
+	}
+	if !fileExists(e.copyFor(v.Token)) {
+		t.Fatal("no stripped copy in the state directory")
+	}
+	if got, _ := os.ReadFile(photo); !bytes.Equal(got, data) {
+		t.Fatal("the original file was modified")
+	}
+
+	resp, body := e.fetch(t, v.URL)
+	if resp.StatusCode != 200 {
+		t.Fatalf("download: %d", resp.StatusCode)
+	}
+	assertNoSecrets(t, body, jpegSecrets)
+	if _, err := jpeg.Decode(bytes.NewReader(body)); err != nil {
+		t.Fatalf("downloaded JPEG doesn't decode: %v", err)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, `filename="holiday photo.jpg"`) {
+		t.Fatalf("Content-Disposition = %q, want the original filename", cd)
+	}
+	// Used up: the copy is deleted.
+	e.waitNoCopy(t, v.Token)
+}
+
+func TestCLIKeepMetadataServesOriginal(t *testing.T) {
+	e := newCLIEnv(t)
+	data := jpegFixture(t, 6)
+	photo := writeFixture(t, "photo.jpg", data)
+	for _, flag := range []string{"--keep-metadata", "-k"} {
+		v, errOut := e.shareJSON(t, photo, flag)
+		if v.MetadataStripped {
+			t.Fatalf("%s: metadata_stripped = true", flag)
+		}
+		if !strings.Contains(errOut, "warning: metadata is not being removed") || !strings.Contains(errOut, securityWarning) {
+			t.Errorf("%s: stderr is missing the metadata or encryption warning:\n%s", flag, errOut)
+		}
+		if fileExists(e.copyFor(v.Token)) {
+			t.Fatalf("%s: a stripped copy was made", flag)
+		}
+		if _, body := e.fetch(t, v.URL); !bytes.Equal(body, data) {
+			t.Fatalf("%s: download differs from the original", flag)
+		}
+	}
+}
+
+func TestCLIUnsupportedTypeSharesWithWarning(t *testing.T) {
+	e := newCLIEnv(t)
+	data := []byte("\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom-video-bytes")
+	v, errOut := e.shareJSON(t, writeFixture(t, "clip.mp4", data))
+	if v.MetadataStripped {
+		t.Fatal("metadata_stripped = true for an unsupported type")
+	}
+	if !strings.Contains(errOut, "warning: can't remove metadata from .mp4 files; sharing as-is\n") {
+		t.Fatalf("stderr is missing the one-line warning:\n%s", errOut)
+	}
+	if _, body := e.fetch(t, v.URL); !bytes.Equal(body, data) {
+		t.Fatal("download differs from the original")
+	}
+}
+
+func TestCLIEncryptedFileWarnsToStripFirst(t *testing.T) {
+	e := newCLIEnv(t)
+	_, errOut := e.shareJSON(t, writeFixture(t, "secret.age", []byte("age-encryption.org/v1\n-> X25519 abc\n")))
+	if !strings.Contains(errOut, "strip metadata before encrypting") {
+		t.Fatalf("stderr:\n%s", errOut)
+	}
+}
+
+func TestCLIStripFailureSharesWithWarning(t *testing.T) {
+	e := newCLIEnv(t)
+	data := []byte{0xFF, 0xD8, 0xFF, 0xE1, 0x7F, 0xFF, 'E', 'x'}
+	v, errOut := e.shareJSON(t, writeFixture(t, "broken.jpg", data))
+	if v.MetadataStripped || !strings.Contains(errOut, "warning: couldn't remove metadata from broken.jpg") {
+		t.Fatalf("metadata_stripped %v, stderr:\n%s", v.MetadataStripped, errOut)
+	}
+	if _, body := e.fetch(t, v.URL); !bytes.Equal(body, data) {
+		t.Fatal("download differs from the original")
+	}
+	if entries, _ := os.ReadDir(filepath.Join(e.home, "files")); len(entries) != 0 {
+		t.Fatalf("leftover files after a failed strip: %v", entries)
+	}
+}
+
+func TestCLIConfigStripMetadata(t *testing.T) {
+	e := newCLIEnv(t)
+	os.MkdirAll(e.home, 0o700)
+	os.WriteFile(filepath.Join(e.home, "config.toml"), []byte("[share]\nstrip_metadata = false\n"), 0o600)
+	photo := writeFixture(t, "photo.jpg", jpegFixture(t, 1))
+	v, errOut := e.shareJSON(t, photo)
+	if v.MetadataStripped || !strings.Contains(errOut, "not being removed") {
+		t.Fatalf("strip_metadata = false not applied: %+v\n%s", v, errOut)
+	}
+	if v, _ := e.shareJSON(t, photo, "--keep-metadata=false"); !v.MetadataStripped {
+		t.Fatal("--keep-metadata=false did not override strip_metadata = false")
+	}
+}
+
+func TestCLIListShowsMetadataStatus(t *testing.T) {
+	e := newCLIEnv(t)
+	stripped, _ := e.shareJSON(t, writeFixture(t, "a.jpg", jpegFixture(t, 1)))
+	kept, _ := e.shareJSON(t, writeFixture(t, "b.jpg", jpegFixture(t, 1)), "-k")
+	got := map[string]bool{}
+	for _, it := range e.list(t) {
+		got[it.Token] = it.MetadataStripped
+	}
+	if !got[stripped.Token] || got[kept.Token] {
+		t.Fatalf("list JSON metadata_stripped = %v", got)
+	}
+	out, _, _ := e.run(t, "list")
+	if !strings.Contains(out, "METADATA") || !strings.Contains(out, "removed") || !strings.Contains(out, "kept") {
+		t.Fatalf("list table:\n%s", out)
+	}
+}
+
+func TestCLIStrippedCopySurvivesRestartAndIsDeletedOnRevoke(t *testing.T) {
+	e := newCLIEnv(t)
+	v, _ := e.shareJSON(t, writeFixture(t, "photo.jpg", jpegFixture(t, 1)), "-m", "5")
+	if _, _, code := e.run(t, "stop"); code != 0 {
+		t.Fatal("stop failed")
+	}
+	e.waitDaemonGone(t, 3*time.Second)
+	if !fileExists(e.copyFor(v.Token)) {
+		t.Fatal("stop deleted the stripped copy of an unfinished share")
+	}
+
+	e.share(t, testFile(t, "other")) // restarts the daemon
+	var link string
+	for i := 0; i < 100 && link == ""; i++ {
+		for _, it := range e.list(t) {
+			if it.Token == v.Token {
+				link = it.URL
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if link == "" {
+		t.Fatal("restored share has no link")
+	}
+	if _, body := e.fetch(t, link); bytes.Contains(body, []byte("GPSSECRET")) || bytes.Contains(body, []byte("XMPSECRET")) {
+		t.Fatal("restored share serves metadata")
+	}
+	if _, _, code := e.run(t, "revoke", v.Token[:8]); code != 0 {
+		t.Fatal("revoke failed")
+	}
+	e.waitNoCopy(t, v.Token)
+}
+
+func TestCLIDeletingOriginalEndsStrippedShare(t *testing.T) {
+	e := newCLIEnv(t)
+	photo := writeFixture(t, "photo.jpg", jpegFixture(t, 1))
+	v, _ := e.shareJSON(t, photo, "-m", "5")
+	os.Remove(photo)
+	e.waitGone(t, v.URL)
+	e.waitNoCopy(t, v.Token)
 }

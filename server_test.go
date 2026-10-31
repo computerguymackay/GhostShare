@@ -331,3 +331,25 @@ func TestNoFileTimestampsInResponse(t *testing.T) {
 		t.Fatalf("If-Modified-Since: %d %q, want 200 with the file", resp.StatusCode, body)
 	}
 }
+
+func TestServesStrippedCopyUnderOriginalName(t *testing.T) {
+	e := newServerEnv(t)
+	orig := filepath.Join(t.TempDir(), "Photo 2024.jpg")
+	os.WriteFile(orig, []byte("original-with-metadata"), 0o644)
+	cp := filepath.Join(t.TempDir(), "copy")
+	os.WriteFile(cp, []byte("stripped"), 0o600)
+	tok, _ := newToken()
+	e.store.Add(Share{Token: tok, Path: orig, Filename: "Photo 2024.jpg", ServePath: cp, MetadataStripped: true, MaxDownloads: 5})
+
+	resp, body := e.do(t, "GET", tok, nil)
+	if resp.StatusCode != 200 || body != "stripped" {
+		t.Fatalf("got %d %q, want the stripped copy", resp.StatusCode, body)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, `filename="Photo 2024.jpg"`) {
+		t.Fatalf("Content-Disposition = %q", cd)
+	}
+	os.Remove(orig)
+	if resp, _ := e.do(t, "GET", tok, nil); resp.StatusCode != 410 {
+		t.Fatalf("after deleting the original: %d, want 410", resp.StatusCode)
+	}
+}

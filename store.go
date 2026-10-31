@@ -2,7 +2,8 @@
 //
 // [diverges from QuickShare] The table uses the schema in CLAUDE.md (Data
 // Model): renamed columns, a stored filename, a revoked flag, NULL for "never
-// expires", and an onion_session column for diagnostics. The Go API (Share,
+// expires", an onion_session column for diagnostics, and serve_path /
+// metadata_stripped for metadata-stripped copies. The Go API (Share,
 // Add, Get, List, Increment, Prune, CountActive) keeps QuickShare's names and
 // semantics so the server and daemon code stay portable.
 
@@ -33,6 +34,27 @@ type Share struct {
 	// OnionSession identifies the daemon session that served the share.
 	// Diagnostic only. It is never the onion key.
 	OnionSession string `json:"-"`
+	// ServePath is the metadata-stripped copy in the state directory that
+	// is served instead of Path; empty means Path is served as-is.
+	ServePath string `json:"-"`
+	// MetadataStripped is true when the served file carries no metadata
+	// ghostshare knows how to find.
+	MetadataStripped bool `json:"metadata_stripped"`
+}
+
+// ServedPath is the file actually sent to recipients.
+func (s Share) ServedPath() string {
+	if s.ServePath != "" {
+		return s.ServePath
+	}
+	return s.Path
+}
+
+// Servable reports whether the share's files are still there. Deleting the
+// original ends the share even when a stripped copy is being served, as in
+// QuickShare, so deleting a file always cancels its share.
+func (s Share) Servable() bool {
+	return fileExists(s.Path) && (s.ServePath == "" || fileExists(s.ServePath))
 }
 
 // Active reports whether the share can still be downloaded at time now.
@@ -64,10 +86,19 @@ const schema = `CREATE TABLE IF NOT EXISTS shares (
 	downloads     INTEGER DEFAULT 0,
 	created_at    INTEGER NOT NULL,
 	revoked       INTEGER DEFAULT 0,
-	onion_session TEXT               -- session id, diagnostic only; not the key
+	onion_session TEXT,              -- session id, diagnostic only; not the key
+	serve_path    TEXT,              -- stripped copy to serve; NULL = file_path
+	metadata_stripped INTEGER DEFAULT 0
 )`
 
-const shareColumns = `token, file_path, filename, created_at, expires_at, max_downloads, downloads, revoked, onion_session`
+// addedColumns were added after the first schema; openStore adds them to
+// older databases.
+var addedColumns = []struct{ name, def string }{
+	{"serve_path", "TEXT"},
+	{"metadata_stripped", "INTEGER DEFAULT 0"},
+}
+
+const shareColumns = `token, file_path, filename, created_at, expires_at, max_downloads, downloads, revoked, onion_session, serve_path, metadata_stripped`
 
 func openStore(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
@@ -80,8 +111,38 @@ func openStore(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init database: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("upgrade database: %w", err)
+	}
 	os.Chmod(path, 0o600)
 	return &Store{db: db}, nil
+}
+
+// migrate adds columns that an older state.db lacks.
+func migrate(db *sql.DB) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('shares')`)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	for _, c := range addedColumns {
+		if !have[c.name] {
+			if _, err := db.Exec(`ALTER TABLE shares ADD COLUMN ` + c.name + ` ` + c.def); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -90,9 +151,9 @@ func (s *Store) Add(sh Share) error {
 	if sh.Filename == "" {
 		sh.Filename = filepath.Base(sh.Path)
 	}
-	_, err := s.db.Exec(`INSERT INTO shares(`+shareColumns+`) VALUES(?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT INTO shares(`+shareColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		sh.Token, sh.Path, sh.Filename, sh.Created, nullInt(sh.ExpiresAt), sh.MaxDownloads,
-		sh.Count, sh.Revoked, nullString(sh.OnionSession))
+		sh.Count, sh.Revoked, nullString(sh.OnionSession), nullString(sh.ServePath), sh.MetadataStripped)
 	return err
 }
 
@@ -101,11 +162,14 @@ type scanner interface{ Scan(dest ...any) error }
 func scanShare(row scanner) (Share, error) {
 	var sh Share
 	var expires sql.NullInt64
-	var session sql.NullString
+	var session, servePath sql.NullString
+	var stripped sql.NullBool
 	err := row.Scan(&sh.Token, &sh.Path, &sh.Filename, &sh.Created, &expires,
-		&sh.MaxDownloads, &sh.Count, &sh.Revoked, &session)
+		&sh.MaxDownloads, &sh.Count, &sh.Revoked, &session, &servePath, &stripped)
 	sh.ExpiresAt = expires.Int64
 	sh.OnionSession = session.String
+	sh.ServePath = servePath.String
+	sh.MetadataStripped = stripped.Bool
 	return sh, err
 }
 
@@ -176,7 +240,7 @@ func (s *Store) Prune(now time.Time) ([]Share, error) {
 	}
 	var removed []Share
 	for _, sh := range all {
-		if sh.Active(now) && fileExists(sh.Path) {
+		if sh.Active(now) && sh.Servable() {
 			continue
 		}
 		if _, err := s.Delete(sh.Token); err != nil {

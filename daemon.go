@@ -8,6 +8,8 @@
 //     reports progress, and the auto-shutdown timer only runs once Tor is
 //     connected. Adding a share waits until its onion is reachable.
 //   - Revoke marks a share revoked instead of deleting it.
+//   - Metadata is stripped by default: each share serves a stripped copy
+//     from the state directory, deleted when the share ends.
 //   - QuickShare's spawn.go (ensureDaemon and helpers) is at the end of this
 //     file, because CLAUDE.md's layout has no spawn.go.
 
@@ -94,6 +96,9 @@ type Daemon struct {
 	onions       map[string]*shareOnion // by share token
 	onionsClosed bool
 
+	copiesMu  sync.Mutex
+	preparing map[string]bool // tokens whose stripped copy is being written
+
 	mu         sync.Mutex
 	graceTimer *time.Timer
 
@@ -110,7 +115,7 @@ type shareOnion struct {
 
 func newDaemon(p Paths, opt DaemonOptions, logger *log.Logger) *Daemon {
 	return &Daemon{p: p, opt: opt, log: logger, stop: make(chan struct{}),
-		phase: "starting", onions: map[string]*shareOnion{}}
+		phase: "starting", onions: map[string]*shareOnion{}, preparing: map[string]bool{}}
 }
 
 // Run serves until ctx is cancelled, a stop command arrives, or no
@@ -143,6 +148,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for _, sh := range removed {
 		d.log.Printf("dropped %s on startup (%s)", shortToken(sh.Token), deadReason(sh, now))
 	}
+	d.sweepCopies()
 
 	sid, err := newToken()
 	if err != nil {
@@ -404,13 +410,77 @@ func (d *Daemon) prune() {
 		d.log.Printf("share %s ended (%s)", shortToken(sh.Token), deadReason(sh, now))
 		d.endShareOnion(sh.Token, false)
 	}
+	d.sweepCopies()
+}
+
+// copyPath is where a share's metadata-stripped copy lives. It is derived
+// from the token, never from a stored path, so cleanup can only ever
+// delete ghostshare's own copies, never a user's file.
+func copyPath(p Paths, token string) string { return filepath.Join(p.Files, token) }
+
+// prepareCopy strips metadata from src into the state directory. It
+// returns the path to serve ("" for the original), whether the served file
+// is metadata-free, and a warning for the user. It never fails a share.
+func (d *Daemon) prepareCopy(token, src string) (servePath string, stripped bool, warning string) {
+	d.copiesMu.Lock()
+	d.preparing[token] = true
+	d.copiesMu.Unlock()
+	if err := os.MkdirAll(d.p.Files, 0o700); err != nil {
+		return "", false, fmt.Sprintf("couldn't create %s for the stripped copy (%v); sharing as-is", d.p.Files, err)
+	}
+	dst := copyPath(d.p, token)
+	res := stripMetadata(src, dst)
+	switch {
+	case res.Copied:
+		d.log.Printf("share %s: metadata removed", shortToken(token))
+		return dst, true, res.Warning
+	case res.Warning != "":
+		d.log.Printf("share %s: sharing as-is (%s)", shortToken(token), res.Warning)
+	}
+	return "", res.Stripped, res.Warning
+}
+
+// donePreparing lets sweepCopies see token's copy again, once its share
+// is in the store (or abandoned).
+func (d *Daemon) donePreparing(token string) {
+	d.copiesMu.Lock()
+	delete(d.preparing, token)
+	d.copiesMu.Unlock()
+}
+
+// sweepCopies deletes stripped copies whose share no longer exists. On
+// Windows a copy still open for a draining download can't be deleted yet;
+// a later sweep gets it.
+func (d *Daemon) sweepCopies() {
+	entries, err := os.ReadDir(d.p.Files)
+	if err != nil {
+		return
+	}
+	all, err := d.store.List()
+	if err != nil {
+		return
+	}
+	live := map[string]bool{}
+	for _, sh := range all {
+		live[sh.Token] = true
+	}
+	d.copiesMu.Lock()
+	defer d.copiesMu.Unlock()
+	for _, e := range entries {
+		tok := strings.TrimSuffix(e.Name(), ".tmp")
+		finished := !strings.HasSuffix(e.Name(), ".tmp")
+		if (live[tok] && finished) || d.preparing[tok] {
+			continue
+		}
+		os.Remove(filepath.Join(d.p.Files, e.Name()))
+	}
 }
 
 func deadReason(sh Share, now time.Time) string {
 	switch {
 	case sh.Revoked:
 		return "revoked"
-	case !fileExists(sh.Path):
+	case !sh.Servable():
 		return "file missing"
 	case sh.ExpiresAt != 0 && now.Unix() >= sh.ExpiresAt:
 		return "expired"
@@ -491,6 +561,7 @@ func (d *Daemon) serveControl(l net.Listener) {
 				d.log.Printf("share %s: the CLI went away before getting its link; revoking", shortToken(resp.Share.Token))
 				d.store.Revoke(resp.Share.Token)
 				d.endShareOnion(resp.Share.Token, true)
+				os.Remove(copyPath(d.p, resp.Share.Token))
 				d.evaluate()
 			}
 			if req.Op == "stop" && resp.OK {
@@ -553,7 +624,14 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 		sh := Share{Token: tok, Path: req.Path, Filename: filepath.Base(req.Path),
 			Created: time.Now().Unix(), ExpiresAt: req.ExpiresAt, MaxDownloads: req.MaxDownloads,
 			OnionSession: d.session}
-		if err := d.store.Add(sh); err != nil {
+		warning := ""
+		if !req.KeepMetadata {
+			sh.ServePath, sh.MetadataStripped, warning = d.prepareCopy(tok, req.Path)
+		}
+		err = d.store.Add(sh)
+		d.donePreparing(tok)
+		if err != nil {
+			os.Remove(copyPath(d.p, tok))
 			return fail("save share: %v", err)
 		}
 		d.log.Printf("share %s added: %s (%s)", shortToken(tok), sh.Filename, describeLimits(sh))
@@ -561,10 +639,11 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 		host, err := d.publishShare(sh)
 		if err != nil {
 			d.store.Delete(tok)
+			os.Remove(copyPath(d.p, tok))
 			d.evaluate()
 			return fail("could not publish an onion service for this share: %v", err)
 		}
-		return ctrlResponse{OK: true, Share: &sh, URL: shareURL(host, sh)}
+		return ctrlResponse{OK: true, Share: &sh, URL: shareURL(host, sh), Warning: warning}
 
 	case "list":
 		live, err := d.liveShares()
@@ -587,6 +666,7 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 		}
 		d.log.Printf("share %s revoked", shortToken(tok))
 		d.endShareOnion(tok, true)
+		os.Remove(copyPath(d.p, tok))
 		d.evaluate()
 		return ctrlResponse{OK: true, Share: &Share{Token: tok}}
 

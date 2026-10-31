@@ -25,6 +25,7 @@ type ctrlRequest struct {
 	ExpiresAt    int64  `json:"expires_at,omitempty"`
 	MaxDownloads int    `json:"max_downloads,omitempty"`
 	Token        string `json:"token,omitempty"`
+	KeepMetadata bool   `json:"keep_metadata,omitempty"` // add-share: serve the original, unstripped
 }
 
 type DaemonStatus struct {
@@ -38,13 +39,14 @@ type DaemonStatus struct {
 }
 
 type ctrlResponse struct {
-	OK     bool              `json:"ok"`
-	Error  string            `json:"error,omitempty"`
-	Status *DaemonStatus     `json:"status,omitempty"`
-	Share  *Share            `json:"share,omitempty"`
-	Shares []Share           `json:"shares,omitempty"`
-	URL    string            `json:"url,omitempty"`  // add-share: the new share's link
-	URLs   map[string]string `json:"urls,omitempty"` // list: token -> current link
+	OK      bool              `json:"ok"`
+	Error   string            `json:"error,omitempty"`
+	Status  *DaemonStatus     `json:"status,omitempty"`
+	Share   *Share            `json:"share,omitempty"`
+	Shares  []Share           `json:"shares,omitempty"`
+	URL     string            `json:"url,omitempty"`     // add-share: the new share's link
+	Warning string            `json:"warning,omitempty"` // add-share: one line for the user's stderr
+	URLs    map[string]string `json:"urls,omitempty"`    // list: token -> current link
 }
 
 // errDaemonDown means nothing answered on the control channel.

@@ -3,7 +3,7 @@
 // [diverges from QuickShare] There is no [server] section (bind, wan,
 // tls_cert, tls_key): the Tor onion service replaces all of it. Keys that
 // ghostshare doesn't use are reported, so a config copied from QuickShare
-// doesn't fail silently. The [share] section is unchanged.
+// doesn't fail silently. [share] adds strip_metadata (default true).
 
 package main
 
@@ -22,6 +22,7 @@ type Config struct {
 	Share struct {
 		DefaultExpiry       string `toml:"default_expiry"`
 		DefaultMaxDownloads *int   `toml:"default_max_downloads"`
+		StripMetadata       *bool  `toml:"strip_metadata"`
 	} `toml:"share"`
 }
 
@@ -34,6 +35,13 @@ const configTemplate = `# ghostshare configuration
 [share]
 default_expiry        = "24h"
 default_max_downloads = 1
+
+# Remove EXIF, GPS, author names and similar from a copy of each file
+# before sharing it (the original is never changed). Supported: JPEG, PNG,
+# Office (.docx, .xlsx, .pptx, ...) and OpenDocument files; other types are
+# shared as-is with a warning. -k / --keep-metadata turns this off for one
+# share.
+strip_metadata = true
 `
 
 // loadConfig reads the config file. A missing file is not an error: a
@@ -74,6 +82,10 @@ func loadConfig(p Paths) (Config, []string, error) {
 	if c.Share.DefaultMaxDownloads == nil {
 		one := 1
 		c.Share.DefaultMaxDownloads = &one
+	}
+	if c.Share.StripMetadata == nil {
+		yes := true
+		c.Share.StripMetadata = &yes
 	}
 	return c, warns, nil
 }

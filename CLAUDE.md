@@ -75,7 +75,8 @@ parsing, dispatch ├── config.go # ~/.ghostshare/config.toml load/save
 ├── tor.go # Tor detection, spawn, onion service (bine) ├── server.go 
 # HTTP file server, token routing, download counting
 ├── store.go # SQLite state (shares survive restarts) ├── token.go # 
-144-bit token generation ├── qr.go # QR code rendering (terminal + 
+144-bit token generation ├── metadata.go # metadata stripping (JPEG, 
+PNG, Office, ODF; stdlib only) ├── qr.go # QR code rendering (terminal + 
 PNG) ├── control.go # CLI ↔ daemon socket protocol (line-delimited 
 JSON) ├── paths.go # ~/.ghostshare/ path resolution ├── 
 platform_unix.go # Unix domain socket for control channel └── 
@@ -127,7 +128,18 @@ security warning on every share (to stderr):
   (e.g. `age -p file && ghostshare file.age`). ```
 · Always include the Tor Browser requirement in the README and in 
 ghostshare --help. Recipients must use Tor Browser (or curl 
---socks5-hostname). A normal browser cannot open a .onion. --- 
+--socks5-hostname). A normal browser cannot open a .onion. 
+· Strip metadata by default. Serve a stripped copy from 
+~/.ghostshare/files/<token> (path derived from the token, never from a 
+stored path, so cleanup can't touch user files); delete it when the 
+share ends. Never modify the user's original file. Never block a share 
+over metadata: unsupported types (including PDF, which can't be 
+stripped reliably without a full parser) and failures share the 
+original with a one-line stderr warning. -k/--keep-metadata and 
+strip_metadata = false opt out, with a warning. Pure Go, stdlib only. 
+· Never reveal file timestamps: no Last-Modified header (ServeContent 
+gets time.Time{}), and zip entry times in stripped Office/ODF copies 
+are reset. --- 
 Download-Counting Semantics (match QuickShare exactly) · A completed 
 full GET counts once, even if the same person downloads twice. · A 
 broken transfer doesn't count. If they resume and finish, that counts 
@@ -142,7 +154,8 @@ ghostshare list [-j|--json] show active shares ghostshare revoke
 the daemon (shares preserved in DB) ghostshare tor-status report 
 whether Tor is reachable (running / spawnable / missing) ``` Flags: 
 -m/--max-downloads, -e/--expires, -i/--interactive, -q/--qr, 
--o/--qr-out, -j/--json, -f/--watch, --external-tor. Flag names, short 
+-o/--qr-out, -j/--json, -f/--watch, -k/--keep-metadata, --external-tor. 
+--json includes "metadata_stripped". Flag names, short 
 aliases, and semantics match QuickShare wherever the concept exists 
 (no --wan, --bind, --tls, or --allow-forever — Tor replaces the first 
 three, and --allow-forever is out of scope for v1). stdout is sacred: 
@@ -176,7 +189,10 @@ key. store.go keeps QuickShare's Go API so callers stay portable
   INTEGER, -- 0 = unlimited downloads INTEGER DEFAULT 0, created_at 
   INTEGER NOT NULL, revoked INTEGER DEFAULT 0, onion_session TEXT -- 
   session id, diagnostic only; not the key
-); ``` No onion keypair is stored — ephemeral by design. On daemon 
+  , serve_path TEXT -- stripped copy to serve; NULL = file_path
+  , metadata_stripped INTEGER DEFAULT 0
+); ``` serve_path and metadata_stripped were added later; openStore adds 
+them to older databases (ALTER TABLE ADD COLUMN). No onion keypair is stored — ephemeral by design. On daemon 
 restart, surviving shares get a new onion address. --- Explicit 
 Non-Goals (v1) If a user asks for any of these, say "that's v2" and 
 move on: · Clearnet fallback. (Standalone is the whole point.) · 

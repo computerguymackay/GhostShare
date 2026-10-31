@@ -3,6 +3,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,5 +161,61 @@ func TestRevoke(t *testing.T) {
 	}
 	if n, _ := st.CountActive(now); n != 0 {
 		t.Fatalf("active = %d, want 0", n)
+	}
+}
+
+func TestServePathAndMetadataRoundTrip(t *testing.T) {
+	st := testStore(t)
+	want := Share{Token: "tok", Path: "/srv/photo.jpg", Filename: "photo.jpg", Created: 1,
+		MaxDownloads: 1, ServePath: "/home/u/.ghostshare/files/tok", MetadataStripped: true}
+	st.Add(want)
+	if got, _ := st.Get("tok"); got != want {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+	st.Add(Share{Token: "plain", Path: "/srv/a.txt", MaxDownloads: 1})
+	if got, _ := st.Get("plain"); got.ServePath != "" || got.MetadataStripped || got.ServedPath() != "/srv/a.txt" {
+		t.Fatalf("plain share = %+v", got)
+	}
+}
+
+// A state.db from before metadata stripping gets the new columns and keeps
+// its shares.
+func TestOpenStoreUpgradesOldDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE shares (token TEXT PRIMARY KEY, file_path TEXT NOT NULL, filename TEXT NOT NULL,
+		expires_at INTEGER, max_downloads INTEGER, downloads INTEGER DEFAULT 0, created_at INTEGER NOT NULL,
+		revoked INTEGER DEFAULT 0, onion_session TEXT);
+		INSERT INTO shares (token, file_path, filename, max_downloads, created_at) VALUES ('old', '/x/a.jpg', 'a.jpg', 1, 5);`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := openStore(path)
+	if err != nil {
+		t.Fatalf("opening an old database: %v", err)
+	}
+	defer st.Close()
+	got, err := st.Get("old")
+	if err != nil || got.Path != "/x/a.jpg" || got.ServePath != "" || got.MetadataStripped {
+		t.Fatalf("old share after upgrade = %+v, %v", got, err)
+	}
+	if err := st.Add(Share{Token: "new", Path: "/x/b.jpg", ServePath: "/c", MetadataStripped: true}); err != nil {
+		t.Fatalf("adding to an upgraded database: %v", err)
+	}
+}
+
+func TestDeletingOriginalEndsStrippedShare(t *testing.T) {
+	st := testStore(t)
+	orig := testFile(t, "orig")
+	cp := filepath.Join(t.TempDir(), "copy")
+	os.WriteFile(cp, []byte("copy"), 0o600)
+	st.Add(Share{Token: "tok", Path: orig, ServePath: cp, MaxDownloads: 1})
+	os.Remove(orig)
+	if removed, _ := st.Prune(time.Now()); len(removed) != 1 {
+		t.Fatal("share with a deleted original was not pruned")
 	}
 }

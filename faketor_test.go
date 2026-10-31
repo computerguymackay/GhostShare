@@ -260,3 +260,23 @@ func linkParts(t *testing.T, link string) (onion, token string) {
 	}
 	return parts[0], parts[1]
 }
+
+// onionFetch is onionGet that also returns the response headers.
+func onionFetch(t *testing.T, socks, link string) (*http.Response, []byte, bool) {
+	t.Helper()
+	d, err := proxy.SOCKS5("tcp", socks, nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		DialContext:       d.(proxy.ContextDialer).DialContext,
+		DisableKeepAlives: true,
+	}}
+	resp, err := c.Get(link)
+	if err != nil {
+		return nil, nil, false
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp, b, true
+}

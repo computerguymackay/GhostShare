@@ -3,15 +3,15 @@
 GhostShare is a Tor-only file-sharing CLI, based on QuickShare (github.com/computerguymackay/QuickShare). One command shares a file through its own temporary Tor onion service and prints one `.onion` link. The link stops working after a set number of downloads or a set time, and its onion address disappears from Tor. No accounts, no relay, no third-party service, and no bundled Tor.
 
 ```console
-$ ghostshare report.pdf
+$ ghostshare holiday.jpg
 publishing a new onion service for this file (this can take a minute)…
 warning: Tor provides anonymity, not file encryption. Anyone with this link can download the file. Encrypt sensitive files first (e.g. `age -p file && ghostshare file.age`).
-sharing report.pdf (2.1 MiB) · 1 download, expires 2026-11-01 14:02 UTC
+sharing holiday.jpg (3.4 MiB) · 1 download, expires 2026-11-01 14:02 UTC · metadata removed
 the recipient must open this link in Tor Browser
-http://abc...xyz.onion/q3V9x.../report.pdf
+http://abc...xyz.onion/q3V9x.../holiday.jpg
 ```
 
-The recipient opens the link in Tor Browser, the file downloads, and the link dies.
+The recipient opens the link in Tor Browser, the file downloads, and the link dies. The photo they get has no EXIF, GPS position or camera details: GhostShare strips metadata from a copy of the file by default and never changes your original.
 
 GhostShare is a small tool for people who already use Tor and want to share a file through it with one command. It is not a general-purpose anonymity suite.
 
@@ -66,7 +66,8 @@ ghostshare tor-status         report whether Tor is running, spawnable, or missi
 | --- | --- |
 | `-m`, `--max-downloads N` | downloads allowed (default 1; 0 = unlimited, needs `--expires`) |
 | `-e`, `--expires DURATION` | e.g. `30m`, `24h`, `7d` (default `24h`; 0 = never, needs `--max-downloads`) |
-| `-i`, `--interactive` | prompt for the options |
+| `-k`, `--keep-metadata` | share the file as-is, without removing metadata |
+| `-i`, `--interactive` | prompt for the options (including whether to strip metadata) |
 | `-q`, `--qr` | show the link as a QR code (on stderr) |
 | `-o`, `--qr-out PATH` | save the QR code as a PNG |
 | `-j`, `--json` | print `{url, token, expires_at, max_downloads}` instead of the bare link |
@@ -80,6 +81,24 @@ Only the link (or the JSON) goes to stdout. Warnings, summaries and QR codes go 
 ```sh
 link=$(ghostshare build.tar.gz --json | jq -r .url)
 ```
+
+### Metadata
+
+By default, GhostShare removes metadata before sharing: it writes a stripped copy of the file into its state directory (`~/.ghostshare/files/`) and serves that, under the original filename. Your original file is only read, never changed. The copy is deleted when the share ends (download limit, expiry, `revoke`, or the original is deleted), and kept, like the rest of the share, across `ghostshare stop` and restarts.
+
+| Format | What is removed |
+| --- | --- |
+| JPEG | EXIF (including GPS and camera details), XMP, IPTC, comments, embedded thumbnails, and anything after the end of the image. The ICC color profile is kept, and so is the EXIF orientation (on its own), so photos aren't shown rotated. |
+| PNG | `tEXt`, `zTXt`, `iTXt`, `eXIf` and `tIME` chunks, and anything after the end of the image. |
+| Office: `.docx`, `.xlsx`, `.pptx` and the other Office Open XML types | Document properties (`docProps/core.xml`, `app.xml`, `custom.xml`: author, last editor, company, manager, dates, custom fields) are emptied. Zip entry timestamps, extra fields and comments are cleared. |
+| OpenDocument: `.odt`, `.ods`, `.odp`, `.odg` and templates | `meta.xml` (author, dates, editing statistics) is emptied. Zip entry timestamps, extra fields and comments are cleared. |
+| Plain text | Nothing to remove; shared as-is. |
+
+Everything else is shared as-is with a one-line warning on stderr, for example `warning: can't remove metadata from .mp4 files; sharing as-is`. That includes PDF: its metadata can't be removed reliably without a full PDF parser, because PDFs can hold several old copies of their metadata (incremental saves, compressed object streams). It also includes video, audio, HEIC, SVG, HTML and plain `.zip` files. Encrypted files (`.age`, `.gpg`) are shared as-is too; the warning suggests stripping before encrypting next time. A share is never refused because of metadata: if stripping fails, the original is shared with a warning.
+
+Limits: in Office and OpenDocument files, only the document properties are cleaned. Author names on comments and tracked changes, images embedded in the document (with their own EXIF), document thumbnails, and settings such as printer names are not removed. The file name is never changed. The stripped copy is made when you share, so later edits to the original are not picked up, and it takes as much disk space as the file.
+
+Turn stripping off for one share with `-k` / `--keep-metadata` (a warning says metadata is not being removed), or for all shares with `strip_metadata = false` in the config. `--json` output includes `"metadata_stripped": true|false`, and `ghostshare list` has a METADATA column.
 
 ### How shares end
 
@@ -109,6 +128,7 @@ On first run, GhostShare writes `~/.ghostshare/config.toml` (or `$GHOSTSHARE_HOM
 [share]
 default_expiry        = "24h"
 default_max_downloads = 1
+strip_metadata        = true
 ```
 
 Flags override the config. There are no network settings; QuickShare's `[server]` section is reported as unused if present.
@@ -120,13 +140,15 @@ Flags override the config. There are no network settings; QuickShare's `[server]
 | `GHOSTSHARE_TOR_SOCKS` | SOCKS address for the reachability check (default: ask Tor) |
 | `GHOSTSHARE_GRACE`, `GHOSTSHARE_TICK` | daemon idle timeout (45s) and expiry check interval (10s) |
 
-The state directory holds `state.db` (the shares), `ghostshare.log` (the daemon log), and the daemon's lock and control socket.
+The state directory holds `state.db` (the shares), `files/` (metadata-stripped copies), `ghostshare.log` (the daemon log), and the daemon's lock and control socket.
 
 ## Security and privacy
 
 - **Tor is anonymity, not encryption.** The onion service hides where the file is served from, but anyone who has the link can download the file. Encrypt sensitive files first, for example with `age -p`.
 - **The link is the secret.** Each link has its own onion address and a random 144-bit token. Share it only over a channel you trust.
 - **Shares are unlinkable.** Different shares never share an onion address, so recipients can't connect them to each other, and a finished share's address stops answering instead of confirming you're still online.
+- **Metadata stripped by default.** See [Metadata](#metadata) for what is and isn't removed.
+- **No file timestamps.** Downloads carry no `Last-Modified` header, so recipients don't learn when the file was last changed.
 - **No onion keys on disk.** Tor is told to discard the onion service's private key, so GhostShare never has it and can't store it.
 - **Minimal logs.** The daemon log never records client addresses or onion addresses, and shows tokens only as their first 8 characters.
 - **Tor control access.** If your Tor runs as a system service and `tor-status` reports an authentication error, your user needs read access to Tor's auth cookie. On Debian/Ubuntu: `sudo usermod -aG debian-tor $USER`, then log out and back in.

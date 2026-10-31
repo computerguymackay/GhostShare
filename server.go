@@ -2,7 +2,9 @@
 //
 // [diverges from QuickShare] Log lines never include r.RemoteAddr (CLAUDE.md:
 // "Never log IPs"), the download name comes from the stored filename, and
-// no Last-Modified header is sent (it would reveal the file's mtime).
+// no Last-Modified header is sent (it would reveal the file's mtime). A
+// share with a metadata-stripped copy serves the copy, under the original
+// filename.
 // The download-counting rule is unchanged.
 
 package main
@@ -74,7 +76,12 @@ func (fs *FileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(sh.Path)
+	if !sh.Servable() {
+		fs.store.Delete(token)
+		gone("file missing")
+		return
+	}
+	f, err := os.Open(sh.ServedPath())
 	if err != nil {
 		fs.store.Delete(token)
 		gone("file missing")

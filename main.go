@@ -11,6 +11,7 @@
 //   - Every share gets its own .onion address, and `list` shows each share's
 //     current link, since restarts change the addresses.
 //   - Every share prints the Tor security warning and the Tor Browser note.
+//   - Metadata is stripped by default; -k/--keep-metadata opts out.
 
 package main
 
@@ -52,6 +53,7 @@ Usage:
 Share flags:
   -m, --max-downloads N   downloads allowed (default 1; 0 = unlimited, needs --expires)
   -e, --expires DURATION  e.g. 30m, 24h, 7d (default 24h; 0 = never, needs --max-downloads)
+  -k, --keep-metadata     share the file as-is, without removing metadata
   -i, --interactive       prompt for options
   -q, --qr                show the link as a QR code (on stderr)
   -o, --qr-out PATH       save the QR code as a PNG
@@ -142,6 +144,7 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxFlag := fs.Int("max-downloads", 1, "")
 	expFlag := fs.String("expires", "", "")
 	interactive := fs.Bool("interactive", false, "")
+	keepMeta := fs.Bool("keep-metadata", false, "")
 	showQR := fs.Bool("qr", false, "")
 	qrOut := fs.String("qr-out", "", "")
 	jsonOut := fs.Bool("json", false, "")
@@ -151,7 +154,7 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Short aliases. --external-tor deliberately has none.
 	short := map[string]string{
 		"m": "max-downloads", "e": "expires", "i": "interactive",
-		"q": "qr", "o": "qr-out", "j": "json", "f": "watch",
+		"q": "qr", "o": "qr-out", "j": "json", "f": "watch", "k": "keep-metadata",
 	}
 	for s, long := range short {
 		fs.Var(fs.Lookup(long).Value, s, "")
@@ -218,8 +221,12 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errorf(stderr, "--expires: %v", err)
 	}
+	strip := *cfg.Share.StripMetadata
+	if set["keep-metadata"] {
+		strip = !*keepMeta
+	}
 	if *interactive {
-		maxDl, expires, *showQR, err = promptOptions(stdin, stderr, maxDl, expires, *showQR)
+		maxDl, expires, strip, *showQR, err = promptOptions(stdin, stderr, maxDl, expires, strip, *showQR)
 		if err != nil {
 			return errorf(stderr, "%v", err)
 		}
@@ -248,7 +255,8 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		expiresAt = time.Now().Add(expires).Unix()
 	}
 	fmt.Fprintln(stderr, "publishing a new onion service for this file (this can take a minute)…")
-	resp, err := ctrlCallTimeout(p, ctrlRequest{Op: "add-share", Path: path, ExpiresAt: expiresAt, MaxDownloads: maxDl}, shareWaitTimeout)
+	resp, err := ctrlCallTimeout(p, ctrlRequest{Op: "add-share", Path: path, ExpiresAt: expiresAt,
+		MaxDownloads: maxDl, KeepMetadata: !strip}, shareWaitTimeout)
 	if err != nil {
 		return errorf(stderr, "add share: %v", err)
 	}
@@ -256,14 +264,21 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	link := resp.URL
 
 	fmt.Fprintln(stderr, securityWarning)
+	switch {
+	case !strip:
+		warnf(stderr, "metadata is not being removed (EXIF, GPS, author names and the like are shared as-is)")
+	case resp.Warning != "":
+		warnf(stderr, "%s", resp.Warning)
+	}
 
 	if *jsonOut {
 		out := struct {
-			URL          string  `json:"url"`
-			Token        string  `json:"token"`
-			ExpiresAt    *string `json:"expires_at"`
-			MaxDownloads int     `json:"max_downloads"`
-		}{URL: link, Token: sh.Token, MaxDownloads: sh.MaxDownloads}
+			URL              string  `json:"url"`
+			Token            string  `json:"token"`
+			ExpiresAt        *string `json:"expires_at"`
+			MaxDownloads     int     `json:"max_downloads"`
+			MetadataStripped bool    `json:"metadata_stripped"`
+		}{URL: link, Token: sh.Token, MaxDownloads: sh.MaxDownloads, MetadataStripped: sh.MetadataStripped}
 		if sh.ExpiresAt != 0 {
 			s := time.Unix(sh.ExpiresAt, 0).UTC().Format(time.RFC3339)
 			out.ExpiresAt = &s
@@ -271,7 +286,7 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		enc := json.NewEncoder(stdout)
 		enc.Encode(out)
 	} else {
-		fmt.Fprintf(stderr, "sharing %s (%s) · %s\n", sh.Filename, humanSize(fi.Size()), describeLimits(sh))
+		fmt.Fprintf(stderr, "sharing %s (%s) · %s · %s\n", sh.Filename, humanSize(fi.Size()), describeLimits(sh), metadataStatus(sh))
 		fmt.Fprintln(stderr, "the recipient must open this link in Tor Browser")
 		fmt.Fprintln(stdout, link)
 	}
@@ -302,7 +317,15 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func promptOptions(stdin io.Reader, w io.Writer, maxDl int, exp time.Duration, qr bool) (int, time.Duration, bool, error) {
+// metadataStatus is how `list` and the share summary describe a share's metadata.
+func metadataStatus(sh Share) string {
+	if sh.MetadataStripped {
+		return "metadata removed"
+	}
+	return "metadata kept"
+}
+
+func promptOptions(stdin io.Reader, w io.Writer, maxDl int, exp time.Duration, strip, qr bool) (int, time.Duration, bool, bool, error) {
 	r := bufio.NewReader(stdin)
 	ask := func(q, def string) string {
 		fmt.Fprintf(w, "%s [%s]: ", q, def)
@@ -333,12 +356,29 @@ func promptOptions(stdin io.Reader, w io.Writer, maxDl int, exp time.Duration, q
 		}
 		fmt.Fprintln(w, " ", err)
 	}
+	for {
+		hint := "Y/n"
+		if !strip {
+			hint = "y/N"
+		}
+		fmt.Fprintf(w, "Strip metadata (EXIF, GPS, author, etc.) before sharing? [%s]: ", hint)
+		line, _ := r.ReadString('\n')
+		ans := strings.ToLower(strings.TrimSpace(line))
+		if ans == "" {
+			break
+		}
+		if strings.HasPrefix(ans, "y") || strings.HasPrefix(ans, "n") {
+			strip = strings.HasPrefix(ans, "y")
+			break
+		}
+		fmt.Fprintln(w, "  answer y or n")
+	}
 	def := "n"
 	if qr {
 		def = "y"
 	}
 	ans := strings.ToLower(ask("Show QR code? (y/n)", def))
-	return maxDl, exp, strings.HasPrefix(ans, "y"), nil
+	return maxDl, exp, strip, strings.HasPrefix(ans, "y"), nil
 }
 
 func watchLog(p Paths, offset int64, w io.Writer) {
@@ -435,7 +475,7 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "TOKEN\tFILE\tDOWNLOADS\tEXPIRES\tLINK")
+	fmt.Fprintln(tw, "TOKEN\tFILE\tDOWNLOADS\tEXPIRES\tMETADATA\tLINK")
 	now := time.Now()
 	for _, it := range items {
 		exp := "never"
@@ -450,7 +490,11 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		default:
 			link = "(offline)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", it.Token, it.Path, countString(it.Share), exp, link)
+		meta := "kept"
+		if it.MetadataStripped {
+			meta = "removed"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", it.Token, it.Path, countString(it.Share), exp, meta, link)
 	}
 	tw.Flush()
 	return 0
@@ -473,7 +517,7 @@ func offlineShares(p Paths) ([]Share, error) {
 	now := time.Now()
 	var live []Share
 	for _, sh := range all {
-		if sh.Active(now) && fileExists(sh.Path) {
+		if sh.Active(now) && sh.Servable() {
 			live = append(live, sh)
 		}
 	}
@@ -520,6 +564,7 @@ func revokeOffline(p Paths, q string) (string, error) {
 	}
 	defer st.Close()
 	_, err = st.Revoke(tok)
+	os.Remove(copyPath(p, tok)) // the daemon would also sweep it on its next start
 	return tok, err
 }
 
