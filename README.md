@@ -96,17 +96,28 @@ ghostshare photo.jpg -q                  # also show a QR code, for a phone
 ghostshare notes.txt -k                  # share as-is, without removing metadata
 link=$(ghostshare build.tar.gz --json | jq -r .url)
 
-ghostshare list                          # active shares and their links
-ghostshare revoke q3V9xA                 # end a share early (6+ character prefix)
+ghostshare list                          # active shares: number, name, links
+ghostshare revoke 2                      # end share #2 early
 ghostshare stop                          # stop the daemon; unfinished shares are kept
 ```
+
+`ghostshare list` shows each share's number, the name the recipient's download is saved as, where the file is on your machine, and its link:
+
+```console
+$ ghostshare list
+#  NAME        FROM                    DOWNLOADS  EXPIRES   METADATA  LINK
+1  report.pdf  ~/Documents/report.pdf  0/3        in 2h00m  removed   http://abc...xyz.onion/q3V9x...
+3  notes.txt   ~/notes.txt             0/1        in 30m    removed   http://def...uvw.onion/lNftL...
+```
+
+A share keeps its number until it ends. Numbers only go up while anything is being shared, so a number never points at a different share than the one you saw, and gaps (like #2 here) are shares that have ended. Once nothing is shared, numbering starts again at 1. Numbers stay on your machine: they are never part of the link.
 
 Each share takes 10–60 seconds while its onion service is published, a little longer the first time if GhostShare has to start Tor. GhostShare only prints a link once that onion answers through Tor. Now and then a new link takes a minute or two to open in Tor Browser; if it doesn't load at first, wait a moment and try again.
 
 ```text
 ghostshare <file> [flags]     share a file and print its .onion link
 ghostshare list [-j|--json]   show active shares and their current links
-ghostshare revoke <prefix>    cancel a share (a unique prefix of 6+ characters is enough)
+ghostshare revoke <number>    cancel a share by its # in `list` (a 6+ character token prefix also works)
 ghostshare stop               stop the daemon (unfinished shares are kept)
 ghostshare tor-status         report whether Tor is running, spawnable, or missing
 ```

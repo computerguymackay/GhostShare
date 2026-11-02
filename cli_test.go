@@ -327,6 +327,13 @@ func TestCLICrashRestoresSharesOnNewOnion(t *testing.T) {
 	if restored == "" {
 		t.Fatalf("restored share missing from list: %+v", items)
 	}
+	// Numbers survive the crash and aren't repeated: first was #1, the
+	// expired share #2, so the share made at restart is #3.
+	for _, it := range items {
+		if want := map[bool]int{true: 1, false: 3}[it.Token == firstTok]; it.Number != want {
+			t.Errorf("after restart %s is #%d, want #%d", it.Filename, it.Number, want)
+		}
+	}
 	if newOnion, _ := linkParts(t, restored); newOnion == oldOnion {
 		t.Fatal("restored share kept the old onion address")
 	}
@@ -365,7 +372,7 @@ func TestCLIStopListRevoke(t *testing.T) {
 	if items := e.list(t); len(items) != 1 || items[0].Token != tok || items[0].URL != "" {
 		t.Fatalf("offline list: %+v", items)
 	}
-	if out, errOut, code := e.run(t, "revoke", tok[:10]); code != 0 || !strings.Contains(out, tok) {
+	if out, errOut, code := e.run(t, "revoke", tok[:10]); code != 0 || out != "revoked #1 file.txt\n" {
 		t.Fatalf("revoke: %d %q %q", code, out, errOut)
 	}
 	if items := e.list(t); len(items) != 0 {
@@ -380,7 +387,7 @@ func TestCLIRevokeWhileRunning(t *testing.T) {
 	e := newCLIEnv(t)
 	link := e.share(t, testFile(t, "x"))
 	_, tok := linkParts(t, link)
-	if out, errOut, code := e.run(t, "revoke", tok[:6]); code != 0 || !strings.Contains(out, tok) {
+	if out, errOut, code := e.run(t, "revoke", tok[:6]); code != 0 || out != "revoked #1 file.txt\n" {
 		t.Fatalf("revoke: %d %q %q", code, out, errOut)
 	}
 	e.waitGone(t, link)
@@ -622,6 +629,7 @@ func TestCLIInteractive(t *testing.T) {
 
 type shareJSON struct {
 	URL              string `json:"url"`
+	Number           int    `json:"number"`
 	Token            string `json:"token"`
 	MetadataStripped bool   `json:"metadata_stripped"`
 }
@@ -861,4 +869,71 @@ func TestCLISharesSevenZipAsCleanZip(t *testing.T) {
 		t.Fatalf("download is not a zip: %v", err)
 	}
 	assertNoSecrets(t, body, []string{"iPhone", "Jane Photographer"})
+}
+
+// Shares are numbered as they are added; list shows the number and the
+// name the recipient gets; revoke takes the number. Numbers only go up while
+// anything is shared and start again at 1 when nothing is.
+func TestCLIShareNumbersAndRevokeByNumber(t *testing.T) {
+	e := newCLIEnv(t)
+	dir := t.TempDir()
+	file := func(name string) string {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte(name), 0o644)
+		return p
+	}
+	links := map[int]string{}
+	for i, name := range []string{"a.txt", "b.txt"} {
+		out, errOut, code := e.run(t, file(name))
+		if code != 0 {
+			t.Fatal(errOut)
+		}
+		if want := fmt.Sprintf("sharing %s as #%d ", name, i+1); !strings.Contains(errOut, want) {
+			t.Errorf("stderr is missing %q:\n%s", want, errOut)
+		}
+		links[i+1] = strings.TrimSpace(out)
+	}
+	v, _ := e.shareJSON(t, file("c.txt"))
+	if v.Number != 3 {
+		t.Fatalf("--json number = %d, want 3", v.Number)
+	}
+	links[3] = v.URL
+
+	if out, errOut, code := e.run(t, "revoke", "2"); code != 0 || out != "revoked #2 b.txt\n" {
+		t.Fatalf("revoke 2: %d %q %q", code, out, errOut)
+	}
+	e.waitGone(t, links[2])
+	if _, errOut, code := e.run(t, "revoke", "2"); code == 0 || !strings.Contains(errOut, "no active share #2") {
+		t.Fatalf("revoking #2 twice: %d %q", code, errOut)
+	}
+	if v, _ := e.shareJSON(t, file("d.txt")); v.Number != 4 {
+		t.Fatalf("share after revoking #2 = #%d, want #4", v.Number)
+	}
+
+	out, errOut, code := e.run(t, "list")
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	rows := strings.Split(strings.TrimSpace(out), "\n")
+	if len(rows) != 4 || strings.Fields(rows[0])[0] != "#" || strings.Fields(rows[0])[1] != "NAME" {
+		t.Fatalf("list:\n%s", out)
+	}
+	for i, want := range []string{"1 a.txt", "3 c.txt", "4 d.txt"} {
+		f := strings.Fields(rows[i+1])
+		if f[0]+" "+f[1] != want || !strings.HasSuffix(f[2], strings.Fields(want)[1]) {
+			t.Errorf("list row %d = %q, want # and NAME %q and the path in FROM", i+1, rows[i+1], want)
+		}
+	}
+
+	for _, n := range []string{"#1", "3", "4"} {
+		if _, errOut, code := e.run(t, "revoke", n); code != 0 {
+			t.Fatalf("revoke %s: %s", n, errOut)
+		}
+	}
+	if v, _ := e.shareJSON(t, file("e.txt")); v.Number != 1 {
+		t.Fatalf("first share with nothing active = #%d, want #1", v.Number)
+	}
+	if items := e.list(t); len(items) != 1 || items[0].Number != 1 || items[0].Filename != "e.txt" {
+		t.Fatalf("list --json: %+v", items)
+	}
 }

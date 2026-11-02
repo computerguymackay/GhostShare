@@ -12,6 +12,8 @@
 //     current link, since restarts change the addresses.
 //   - Every share prints the Tor security warning and the Tor Browser note.
 //   - Metadata is stripped by default; -k/--keep-metadata opts out.
+//   - Shares have numbers: `list` shows them (with the served filename and
+//     the source path) and `revoke` accepts them. Written to port back.
 
 package main
 
@@ -31,6 +33,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 )
 
 // version is set by release builds: -ldflags "-X main.version=0.1.0".
@@ -60,7 +63,7 @@ const usage = `ghostshare — share a file over a temporary Tor onion service
 Usage:
   ghostshare <file> [flags]       share a file and print its .onion link
   ghostshare list [-j|--json]     show active shares and their current links
-  ghostshare revoke <prefix>      cancel a share (unique prefix of 6+ characters)
+  ghostshare revoke <number>      cancel a share (its # in ghostshare list)
   ghostshare stop                 stop the background daemon (shares are kept)
   ghostshare tor-status           report whether Tor is running, spawnable, or missing
 
@@ -291,11 +294,12 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *jsonOut {
 		out := struct {
 			URL              string  `json:"url"`
+			Number           int     `json:"number"`
 			Token            string  `json:"token"`
 			ExpiresAt        *string `json:"expires_at"`
 			MaxDownloads     int     `json:"max_downloads"`
 			MetadataStripped bool    `json:"metadata_stripped"`
-		}{URL: link, Token: sh.Token, MaxDownloads: sh.MaxDownloads, MetadataStripped: sh.MetadataStripped}
+		}{URL: link, Number: sh.Number, Token: sh.Token, MaxDownloads: sh.MaxDownloads, MetadataStripped: sh.MetadataStripped}
 		if sh.ExpiresAt != 0 {
 			s := time.Unix(sh.ExpiresAt, 0).UTC().Format(time.RFC3339)
 			out.ExpiresAt = &s
@@ -303,7 +307,7 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		enc := json.NewEncoder(stdout)
 		enc.Encode(out)
 	} else {
-		fmt.Fprintf(stderr, "sharing %s (%s) · %s · %s\n", sh.Filename, humanSize(fi.Size()), describeLimits(sh), metadataStatus(sh))
+		fmt.Fprintf(stderr, "sharing %s as #%d (%s) · %s · %s\n", sh.Filename, sh.Number, humanSize(fi.Size()), describeLimits(sh), metadataStatus(sh))
 		fmt.Fprintln(stderr, "the recipient must open this link in Tor Browser")
 		fmt.Fprintln(stdout, link)
 	}
@@ -492,7 +496,7 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "TOKEN\tFILE\tDOWNLOADS\tEXPIRES\tMETADATA\tLINK")
+	fmt.Fprintln(tw, "#\tNAME\tFROM\tDOWNLOADS\tEXPIRES\tMETADATA\tLINK")
 	now := time.Now()
 	for _, it := range items {
 		exp := "never"
@@ -511,10 +515,34 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		if it.MetadataStripped {
 			meta = "removed"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", it.Token, it.Path, countString(it.Share), exp, meta, link)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", it.Number, tableSafe(it.Filename), tableSafe(tildePath(it.Path)),
+			countString(it.Share), exp, meta, link)
 	}
 	tw.Flush()
 	return 0
+}
+
+// tildePath shortens a path under the home folder to ~/...
+func tildePath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if rel, ok := strings.CutPrefix(path, home+string(filepath.Separator)); ok {
+		return "~" + string(filepath.Separator) + rel
+	}
+	return path
+}
+
+// tableSafe keeps a filename from breaking the list table or the terminal:
+// tabs, newlines and other control characters become "?".
+func tableSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // offlineShares reads the database directly when no daemon is running.
@@ -543,7 +571,7 @@ func offlineShares(p Paths) ([]Share, error) {
 
 func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: ghostshare revoke <prefix>")
+		fmt.Fprintln(stderr, "usage: ghostshare revoke <number>   (the # column of `ghostshare list`, or a 6+ character token prefix)")
 		return 2
 	}
 	p, err := resolvePaths()
@@ -552,37 +580,37 @@ func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 	}
 	resp, err := ctrlCall(p, ctrlRequest{Op: "revoke", Token: args[0]})
 	if errors.Is(err, errDaemonDown) {
-		tok, err := revokeOffline(p, args[0])
+		sh, err := revokeOffline(p, args[0])
 		if err != nil {
 			return errorf(stderr, "%v", err)
 		}
-		fmt.Fprintf(stdout, "revoked %s\n", tok)
+		fmt.Fprintf(stdout, "revoked #%d %s\n", sh.Number, sh.Filename)
 		return 0
 	}
 	if err != nil {
 		return errorf(stderr, "%v", err)
 	}
-	fmt.Fprintf(stdout, "revoked %s\n", resp.Share.Token)
+	fmt.Fprintf(stdout, "revoked #%d %s\n", resp.Share.Number, resp.Share.Filename)
 	return 0
 }
 
-func revokeOffline(p Paths, q string) (string, error) {
+func revokeOffline(p Paths, q string) (Share, error) {
 	live, err := offlineShares(p)
 	if err != nil {
-		return "", err
+		return Share{}, err
 	}
-	tok, err := resolveToken(live, q)
+	sh, err := resolveShare(live, q)
 	if err != nil {
-		return "", err
+		return Share{}, err
 	}
 	st, err := openStore(p.DB)
 	if err != nil {
-		return "", err
+		return Share{}, err
 	}
 	defer st.Close()
-	_, err = st.Revoke(tok)
-	os.Remove(copyPath(p, tok)) // the daemon would also sweep it on its next start
-	return tok, err
+	_, err = st.Revoke(sh.Token)
+	os.Remove(copyPath(p, sh.Token)) // the daemon would also sweep it on its next start
+	return sh, err
 }
 
 func cmdStop(stdout, stderr io.Writer) int {
@@ -611,7 +639,7 @@ func cmdStop(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "daemon stopped (pid %d)\n", st.PID)
 	if st.Active > 0 {
-		fmt.Fprintf(stderr, "%d share(s) kept: they come back online, each at a new .onion address, next time the daemon starts. Use `ghostshare revoke <prefix>` to cancel them.\n", st.Active)
+		fmt.Fprintf(stderr, "%d share(s) kept: they come back online, each at a new .onion address, next time the daemon starts. Use `ghostshare revoke <number>` to cancel them.\n", st.Active)
 	}
 	return 0
 }

@@ -650,7 +650,10 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 			os.Remove(copyPath(d.p, tok))
 			return fail("save share: %v", err)
 		}
-		d.log.Printf("share %s added: %s (%s)", shortToken(tok), sh.Filename, describeLimits(sh))
+		if saved, err := d.store.Get(tok); err == nil {
+			sh.Number = saved.Number // assigned by Add
+		}
+		d.log.Printf("share #%d %s added: %s (%s)", sh.Number, shortToken(tok), sh.Filename, describeLimits(sh))
 		d.evaluate()
 		host, err := d.publishShare(sh)
 		if err != nil {
@@ -673,10 +676,11 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 		if err != nil {
 			return fail("%v", err)
 		}
-		tok, err := resolveToken(live, req.Token)
+		target, err := resolveShare(live, req.Token)
 		if err != nil {
 			return fail("%v", err)
 		}
+		tok := target.Token
 		if _, err := d.store.Revoke(tok); err != nil {
 			return fail("revoke: %v", err)
 		}
@@ -684,7 +688,7 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 		d.endShareOnion(tok, true)
 		os.Remove(copyPath(d.p, tok))
 		d.evaluate()
-		return ctrlResponse{OK: true, Share: &Share{Token: tok}}
+		return ctrlResponse{OK: true, Share: &target}
 
 	case "stop":
 		return ctrlResponse{OK: true}

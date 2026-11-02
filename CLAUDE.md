@@ -176,8 +176,8 @@ finish if racing on the last slot — acceptable. Copy this logic from
 QuickShare's server.go. Do not reinvent it. If it needs to change, 
 change it in both repos. --- CLI Surface (v1 — do not expand without 
 asking) ``` ghostshare <file> [flags] share a file, print onion link 
-ghostshare list [-j|--json] show active shares ghostshare revoke 
-<prefix> cancel a share (6+ char unique prefix) ghostshare stop stop 
+ghostshare list [-j|--json] show active shares (# NAME FROM ...) ghostshare revoke 
+<number> cancel a share by its # (or a 6+ char unique token prefix; digits-only is always a number) ghostshare stop stop 
 the daemon (shares preserved in DB) ghostshare tor-status report 
 whether Tor is reachable (running / spawnable / missing) ``` Flags: 
 -m/--max-downloads, -e/--expires, -i/--interactive, -q/--qr, 
@@ -218,8 +218,15 @@ key. store.go keeps QuickShare's Go API so callers stay portable
   session id, diagnostic only; not the key
   , serve_path TEXT -- stripped copy to serve; NULL = file_path
   , metadata_stripped INTEGER DEFAULT 0
-); ``` serve_path and metadata_stripped were added later; openStore adds 
-them to older databases (ALTER TABLE ADD COLUMN). No onion keypair is stored — ephemeral by design. On daemon 
+  , number INTEGER DEFAULT 0 -- share number for list/revoke
+);
+CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+  -- 'last_number': highest share number handed out ``` serve_path, metadata_stripped and number were added later; openStore adds 
+them to older databases (ALTER TABLE ADD COLUMN, numbering existing shares oldest first). Share numbers (Store.Add): only
+go up while any share is active, so a number never points at a different share than the one list showed; restart at 1 when
+no share is active. The last number is kept in the counters table so stop/crash/restart neither resets nor repeats numbers;
+restored shares keep theirs. Numbers are local only, never in a link. Written to port back to QuickShare
+[diverges from QuickShare until ported] (added 2026-11-02). No onion keypair is stored — ephemeral by design. On daemon 
 restart, surviving shares get a new onion address. --- Explicit 
 Non-Goals (v1) If a user asks for any of these, say "that's v2" and 
 move on: · Clearnet fallback. (Standalone is the whole point.) · 

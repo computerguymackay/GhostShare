@@ -3,7 +3,8 @@
 // [diverges from QuickShare] The table uses the schema in CLAUDE.md (Data
 // Model): renamed columns, a stored filename, a revoked flag, NULL for "never
 // expires", an onion_session column for diagnostics, and serve_path /
-// metadata_stripped for metadata-stripped copies. The Go API (Share,
+// metadata_stripped for metadata-stripped copies, and a share number for
+// `list` and `revoke` (see Add). The Go API (Share,
 // Add, Get, List, Increment, Prune, CountActive) keeps QuickShare's names and
 // semantics so the server and daemon code stay portable.
 
@@ -23,6 +24,8 @@ import (
 // Share is one shared file. ExpiresAt == 0 means no expiry (NULL in the
 // database); MaxDownloads == 0 means unlimited downloads.
 type Share struct {
+	// Number is the short number `list` shows and `revoke` accepts. See Add.
+	Number       int    `json:"number"`
 	Token        string `json:"token"`
 	Path         string `json:"path"`
 	Filename     string `json:"filename"`
@@ -88,7 +91,12 @@ const schema = `CREATE TABLE IF NOT EXISTS shares (
 	revoked       INTEGER DEFAULT 0,
 	onion_session TEXT,              -- session id, diagnostic only; not the key
 	serve_path    TEXT,              -- stripped copy to serve; NULL = file_path
-	metadata_stripped INTEGER DEFAULT 0
+	metadata_stripped INTEGER DEFAULT 0,
+	number        INTEGER DEFAULT 0  -- share number for list/revoke; see Add
+);
+CREATE TABLE IF NOT EXISTS counters (
+	name  TEXT PRIMARY KEY,
+	value INTEGER NOT NULL
 )`
 
 // addedColumns were added after the first schema; openStore adds them to
@@ -96,9 +104,10 @@ const schema = `CREATE TABLE IF NOT EXISTS shares (
 var addedColumns = []struct{ name, def string }{
 	{"serve_path", "TEXT"},
 	{"metadata_stripped", "INTEGER DEFAULT 0"},
+	{"number", "INTEGER DEFAULT 0"},
 }
 
-const shareColumns = `token, file_path, filename, created_at, expires_at, max_downloads, downloads, revoked, onion_session, serve_path, metadata_stripped`
+const shareColumns = `token, file_path, filename, created_at, expires_at, max_downloads, downloads, revoked, onion_session, serve_path, metadata_stripped, number`
 
 func openStore(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
@@ -142,19 +151,63 @@ func migrate(db *sql.DB) error {
 			}
 		}
 	}
+	if !have["number"] {
+		// Number the shares an older database already has, oldest first.
+		if _, err := db.Exec(`UPDATE shares SET number = (SELECT COUNT(*) FROM shares AS o
+			WHERE o.created_at < shares.created_at
+			OR (o.created_at = shares.created_at AND o.rowid <= shares.rowid))`); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`INSERT OR REPLACE INTO counters(name, value)
+			SELECT 'last_number', COALESCE(MAX(number), 0) FROM shares`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// Add saves a new share and gives it the next share number. Numbers only
+// go up while any share is active, so a number never points at a different
+// share than the one `list` showed. When no share is active, numbering
+// starts again at 1. The last number handed out is kept in the database,
+// so shares kept by `ghostshare stop` or a crash keep their numbers and new
+// ones don't repeat them.
+//
+// [diverges from QuickShare] Share numbers are new; they are written to be
+// ported back.
 func (s *Store) Add(sh Share) error {
 	if sh.Filename == "" {
 		sh.Filename = filepath.Base(sh.Path)
 	}
-	_, err := s.db.Exec(`INSERT INTO shares(`+shareColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var active, last int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM shares WHERE `+activeWhere, time.Now().Unix()).Scan(&active); err != nil {
+		return err
+	}
+	if active > 0 {
+		err := tx.QueryRow(`SELECT value FROM counters WHERE name = 'last_number'`).Scan(&last)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	sh.Number = last + 1
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO counters(name, value) VALUES('last_number', ?)`, sh.Number); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO shares(`+shareColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sh.Token, sh.Path, sh.Filename, sh.Created, nullInt(sh.ExpiresAt), sh.MaxDownloads,
-		sh.Count, sh.Revoked, nullString(sh.OnionSession), nullString(sh.ServePath), sh.MetadataStripped)
-	return err
+		sh.Count, sh.Revoked, nullString(sh.OnionSession), nullString(sh.ServePath), sh.MetadataStripped,
+		sh.Number); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -165,7 +218,7 @@ func scanShare(row scanner) (Share, error) {
 	var session, servePath sql.NullString
 	var stripped sql.NullBool
 	err := row.Scan(&sh.Token, &sh.Path, &sh.Filename, &sh.Created, &expires,
-		&sh.MaxDownloads, &sh.Count, &sh.Revoked, &session, &servePath, &stripped)
+		&sh.MaxDownloads, &sh.Count, &sh.Revoked, &session, &servePath, &stripped, &sh.Number)
 	sh.ExpiresAt = expires.Int64
 	sh.OnionSession = session.String
 	sh.ServePath = servePath.String
@@ -251,12 +304,15 @@ func (s *Store) Prune(now time.Time) ([]Share, error) {
 	return removed, nil
 }
 
+// activeWhere matches the shares Active accepts, given the time as unix
+// seconds. Its one parameter is now.Unix().
+const activeWhere = `revoked = 0
+	AND (expires_at IS NULL OR expires_at > ?)
+	AND (max_downloads = 0 OR downloads < max_downloads)`
+
 func (s *Store) CountActive(now time.Time) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares
-		WHERE revoked = 0
-		AND (expires_at IS NULL OR expires_at > ?)
-		AND (max_downloads = 0 OR downloads < max_downloads)`, now.Unix()).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares WHERE `+activeWhere, now.Unix()).Scan(&n)
 	return n, err
 }
 
