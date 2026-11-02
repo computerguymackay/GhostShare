@@ -12,8 +12,10 @@
 //     current link, since restarts change the addresses.
 //   - Every share prints the Tor security warning and the Tor Browser note.
 //   - Metadata is stripped by default; -k/--keep-metadata opts out.
-//   - Shares have numbers: `list` shows them (with the served filename and
-//     the source path) and `revoke` accepts them. Written to port back.
+//   - `list` shows NAME (the served filename) and FROM (the source path)
+//     instead of QuickShare's single FILE column, because stripping can
+//     change the served name (photos.7z is served as photos.zip). Share
+//     numbers and `revoke <number>` are the same as QuickShare's.
 
 package main
 

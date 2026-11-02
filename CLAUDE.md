@@ -225,8 +225,8 @@ CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 them to older databases (ALTER TABLE ADD COLUMN, numbering existing shares oldest first). Share numbers (Store.Add): only
 go up while any share is active, so a number never points at a different share than the one list showed; restart at 1 when
 no share is active. The last number is kept in the counters table so stop/crash/restart neither resets nor repeats numbers;
-restored shares keep theirs. Numbers are local only, never in a link. Written to port back to QuickShare
-[diverges from QuickShare until ported] (added 2026-11-02). No onion keypair is stored — ephemeral by design. On daemon 
+restored shares keep theirs. Numbers are local only, never in a link. Same rule and code as QuickShare (ported there 2026-11-02);
+GhostShare's list has NAME + FROM instead of QuickShare's FILE because the served name can differ (7z/RAR repack). No onion keypair is stored — ephemeral by design. On daemon 
 restart, surviving shares get a new onion address. --- Explicit 
 Non-Goals (v1) If a user asks for any of these, say "that's v2" and 
 move on: · Clearnet fallback. (Standalone is the whole point.) · 

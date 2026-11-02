@@ -173,10 +173,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // share than the one `list` showed. When no share is active, numbering
 // starts again at 1. The last number handed out is kept in the database,
 // so shares kept by `ghostshare stop` or a crash keep their numbers and new
-// ones don't repeat them.
-//
-// [diverges from QuickShare] Share numbers are new; they are written to be
-// ported back.
+// ones don't repeat them. Same rule as QuickShare's Store.Add.
 func (s *Store) Add(sh Share) error {
 	if sh.Filename == "" {
 		sh.Filename = filepath.Base(sh.Path)

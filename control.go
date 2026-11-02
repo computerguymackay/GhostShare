@@ -92,9 +92,8 @@ func daemonStatus(p Paths) (DaemonStatus, error) {
 
 // resolveShare finds a share by its number (as `list` shows it, "4" or
 // "#4"), by full token, or by a unique token prefix of at least 6
-// characters. An argument of digits only is always a number.
-//
-// [diverges from QuickShare] Share numbers are new.
+// characters. An argument of digits only is always a number. Same as
+// QuickShare's resolveShare.
 func resolveShare(shares []Share, q string) (Share, error) {
 	q = strings.TrimSuffix(strings.TrimSpace(q), "…")
 	if n, ok := shareNumber(q); ok {
