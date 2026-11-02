@@ -94,7 +94,7 @@ CGO. If Claude Code proposes adding one of these, stop and ask. ---
 Tor Integration Rules 1. Detect, then spawn. On startup, in order:
    1. Try to connect to a running Tor's control port (127.0.0.1:9051, 
    cookie auth preferred). If it works, use it. 2. Else look for a 
-   tor binary on PATH. If found, spawn it with a temp data dir, wait 
+   tor binary on PATH. If found, spawn it with a fresh data dir under ~/.ghostshare/tor/ (removed on exit; leftovers from a killed daemon are deleted at the next daemon start, under the daemon lock), wait 
    for the control port to open, then use it. 3. Else print a clear 
    error with install instructions (Debian/Ubuntu, Fedora, macOS 
    Homebrew, Windows Tor Expert Bundle) and exit non-zero. Do not 

@@ -140,7 +140,7 @@ Flags override the config. There are no network settings; QuickShare's `[server]
 | `GHOSTSHARE_TOR_SOCKS` | SOCKS address for the reachability check (default: ask Tor) |
 | `GHOSTSHARE_GRACE`, `GHOSTSHARE_TICK` | daemon idle timeout (45s) and expiry check interval (10s) |
 
-The state directory holds `state.db` (the shares), `files/` (metadata-stripped copies), `ghostshare.log` (the daemon log), and the daemon's lock and control socket.
+The state directory holds `state.db` (the shares), `files/` (metadata-stripped copies), `tor/` (the data folder of a Tor that GhostShare started; removed when it stops, or at the next start if the daemon was killed), `ghostshare.log` (the daemon log), and the daemon's lock and control socket.
 
 ## Security and privacy
 

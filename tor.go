@@ -16,6 +16,7 @@ import (
 	"net/textproto"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,7 @@ type torEnv struct {
 	controlAddr string
 	socksAddr   string // empty: ask Tor, then fall back to defaultSocksAddr
 	lookPath    func(file string) (string, error)
+	dataDir     string // parent of a spawned Tor's data directory; empty: os.TempDir()
 }
 
 func defaultTorEnv() torEnv {
@@ -231,7 +233,7 @@ func connectTor(env torEnv, allowSpawn bool, progress io.Writer) (*torSession, e
 		return nil, torUnavailable(env.controlAddr, attachErr, false)
 	}
 	fmt.Fprintf(progress, "no running Tor at %s; starting %s\n", env.controlAddr, path)
-	t, proc, err := spawnTor(path)
+	t, proc, err := spawnTor(path, env.dataDir)
 	if err != nil {
 		return nil, err
 	}
@@ -261,14 +263,20 @@ func torUnavailable(controlAddr string, attachErr error, externalTor bool) error
 	return fmt.Errorf("no usable Tor on control port %s (%v), and no tor program on PATH\n\n%s", controlAddr, attachErr, help)
 }
 
-// spawnTor starts a private Tor with a temporary data directory. Tor's own
-// output is captured, not printed, so it can't reach stdout.
-func spawnTor(path string) (*tor.Tor, *torProcess, error) {
+// spawnTor starts a private Tor with a fresh data directory inside base
+// (os.TempDir() if empty). Tor's own output is captured, not printed, so it
+// can't reach stdout.
+func spawnTor(path, base string) (*tor.Tor, *torProcess, error) {
+	if base == "" {
+		base = os.TempDir()
+	} else if err := os.MkdirAll(base, 0o700); err != nil {
+		return nil, nil, fmt.Errorf("tor data directory: %w", err)
+	}
 	out := &tailBuffer{max: 4096}
 	creator := &torCreator{path: path, out: out}
 	t, err := tor.Start(context.Background(), &tor.StartConf{
 		ProcessCreator:  creator,
-		TempDataDirBase: os.TempDir(),
+		TempDataDirBase: base,
 		// Tor exits by itself if ghostshare dies without cleaning up.
 		ExtraArgs: []string{"__OwningControllerProcess", strconv.Itoa(os.Getpid())},
 	})
@@ -564,4 +572,22 @@ func (t *tailBuffer) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return string(t.b)
+}
+
+// sweepTorData deletes the data directories that spawned Tors left in dir
+// when their daemon was killed before it could clean up. Call it only while
+// holding the daemon lock, so no live Tor of ours is using them. They hold
+// Tor's caches and state, never onion keys. It returns how many it removed.
+func sweepTorData(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if os.RemoveAll(filepath.Join(dir, e.Name())) == nil {
+			n++
+		}
+	}
+	return n
 }

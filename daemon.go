@@ -149,6 +149,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.log.Printf("dropped %s on startup (%s)", shortToken(sh.Token), deadReason(sh, now))
 	}
 	d.sweepCopies()
+	if n := sweepTorData(d.p.TorData); n > 0 {
+		d.log.Printf("removed %d leftover Tor data dir(s)", n)
+	}
 
 	sid, err := newToken()
 	if err != nil {
@@ -189,7 +192,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.serveControl(cl)
 
 	d.setPhase("connecting to Tor")
-	sess, err := connectTor(d.opt.Tor, !d.opt.ExternalTor, logWriter{d.log})
+	env := d.opt.Tor
+	env.dataDir = d.p.TorData
+	sess, err := connectTor(env, !d.opt.ExternalTor, logWriter{d.log})
 	if err != nil {
 		return err
 	}

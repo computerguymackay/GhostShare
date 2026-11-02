@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -131,16 +132,21 @@ func TestTorShareEndToEnd(t *testing.T) {
 }
 
 // A spawned Tor gets __OwningControllerProcess, so it exits even if
-// ghostshare is killed without cleaning up, and Close stops it.
+// ghostshare is killed without cleaning up, and Close stops it and removes
+// its data directory.
 func TestTorSpawnedIsOwned(t *testing.T) {
 	requireTor(t)
 	path, err := defaultTorEnv().lookPath("tor")
 	if err != nil {
 		t.Skip("no tor on PATH")
 	}
-	tt, proc, err := spawnTor(path)
+	base := filepath.Join(t.TempDir(), "tor")
+	tt, proc, err := spawnTor(path, base)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if filepath.Dir(tt.DataDir) != base {
+		t.Errorf("data dir %q is not inside %q", tt.DataDir, base)
 	}
 	sess := &torSession{t: tt, spawned: true, proc: proc}
 	t.Cleanup(func() { sess.Close() })
@@ -155,5 +161,8 @@ func TestTorSpawnedIsOwned(t *testing.T) {
 	case <-proc.done:
 	default:
 		t.Fatalf("tor pid %d still running after Close", proc.cmd.Process.Pid)
+	}
+	if _, err := os.Stat(tt.DataDir); !os.IsNotExist(err) {
+		t.Errorf("data dir %q left after Close: %v", tt.DataDir, err)
 	}
 }

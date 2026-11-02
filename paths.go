@@ -1,7 +1,7 @@
 // Ported from QuickShare (github.com/computerguymackay/QuickShare).
 //
 // [diverges from QuickShare] Adds Files, where metadata-stripped copies of
-// shared files are kept.
+// shared files are kept, and TorData, where a spawned Tor keeps its state.
 
 package main
 
@@ -19,6 +19,7 @@ type Paths struct {
 	Config     string
 	DB         string
 	Files      string // metadata-stripped copies, one per share token
+	TorData    string // data directories of Tor processes the daemon starts
 	Sock       string // Unix control socket
 	CtrlAddr   string // Windows: file holding loopback address + key
 	PID        string
@@ -52,6 +53,7 @@ func resolvePaths() (Paths, error) {
 		Config:     filepath.Join(home, "config.toml"),
 		DB:         filepath.Join(home, "state.db"),
 		Files:      filepath.Join(home, "files"),
+		TorData:    filepath.Join(home, "tor"),
 		Sock:       sock,
 		CtrlAddr:   filepath.Join(home, "control.addr"),
 		PID:        filepath.Join(home, "daemon.pid"),

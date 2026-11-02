@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -538,5 +539,28 @@ func TestOversizedHeadersAreRejected(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
 		t.Fatalf("64 KiB header: %d, want 431", resp.StatusCode)
+	}
+}
+
+// A Tor data dir left by a killed daemon is removed when the next daemon
+// starts; one in use by a running daemon is never touched.
+func TestDaemonRemovesLeftoverTorData(t *testing.T) {
+	p := testPaths(t)
+	stale := filepath.Join(p.TorData, "data-dir-1")
+	os.MkdirAll(stale, 0o700)
+	os.WriteFile(filepath.Join(stale, "cached-consensus"), []byte("x"), 0o600)
+	ft := newFakeTor(t, "AUTH METHODS=NULL")
+	startTestDaemon(t, p, ft, time.Minute)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("leftover Tor data dir still there: %v", err)
+	}
+
+	inUse := filepath.Join(p.TorData, "data-dir-2")
+	os.MkdirAll(inUse, 0o700)
+	if err := newDaemon(p, testDaemonOptions(ft, time.Minute), log.New(io.Discard, "", 0)).Run(context.Background()); err != errAlreadyRunning {
+		t.Fatalf("second daemon: %v, want errAlreadyRunning", err)
+	}
+	if _, err := os.Stat(inUse); err != nil {
+		t.Fatalf("a refused daemon removed the running daemon's Tor data: %v", err)
 	}
 }
