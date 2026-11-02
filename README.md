@@ -1,6 +1,8 @@
-# ghostshare
+# GhostShare
 
-GhostShare is a Tor-only file-sharing CLI, based on QuickShare (github.com/computerguymackay/QuickShare). One command shares a file through its own temporary Tor onion service and prints one `.onion` link. The link stops working after a set number of downloads or a set time, and its onion address disappears from Tor. No accounts, no relay, no third-party service, and no bundled Tor.
+GhostShare is a Tor-only file-sharing CLI, based on QuickShare (github.com/computerguymackay/QuickShare).
+
+Run `ghostshare <file>` and it prints a `.onion` link. The file is served from your own computer through a temporary Tor onion service made for that one file. When the download limit or expiry is reached, the onion service is removed and the link stops working. There are no accounts, no cloud hosting and no third-party file storage: the file never leaves your machine except to the person who downloads it.
 
 ```console
 $ ghostshare holiday.jpg
@@ -11,19 +13,39 @@ the recipient must open this link in Tor Browser
 http://abc...xyz.onion/q3V9x.../holiday.jpg
 ```
 
-The recipient opens the link in Tor Browser, the file downloads, and the link dies. The photo they get has no GPS position, camera details or timestamps: GhostShare strips personal metadata from a copy of the file by default (keeping useful tags like a song's title and artist) and never changes your original.
+The recipient opens the link in Tor Browser and the file downloads. Neither side learns the other's IP address. The photo they receive has no GPS position, camera details or timestamps.
 
-GhostShare is a small tool for people who already use Tor and want to share a file through it with one command. It is not a general-purpose anonymity suite.
+## Why use it
+
+- **Anonymous by default.** Files are only ever served over Tor. There is no clearnet fallback: if Tor isn't available, GhostShare refuses to share.
+- **Temporary.** Every share ends, after a number of downloads (default 1), a time limit (default 24 hours), or `ghostshare revoke`. Its onion address then disappears from Tor.
+- **One onion per file.** Each share gets its own `.onion` address and token, so recipients of different files can't tell they came from the same person.
+- **Metadata removed by default.** A cleaned copy is shared, using [metakill](https://github.com/computerguymackay/metakill): GPS, timestamps, device details and author names are removed, while a song's title, artist and cover art are kept. Your original file is never changed.
+- **Nothing to sign up for or trust with your file.** No accounts, no upload to a server, no service that keeps a copy.
+- **Small and scriptable.** A single static Go binary that uses the Tor you already have. Only the link goes to stdout.
+
+## How it compares
+
+| | Cloud file-sharing services | GhostShare |
+| --- | --- | --- |
+| Where the file is stored | On the provider's servers | Only on your computer |
+| Account | Usually required | None |
+| Who sees your IP address | The provider sees both yours and the recipient's | No one: both sides connect through Tor |
+| Link lifetime | Often long-lived or permanent | Ends after N downloads or a set time |
+| File metadata | Usually shared as-is | Removed by default |
+| Availability | Always online | Only while your computer is on and connected |
+| What the recipient needs | Any browser | Tor Browser |
+
+[OnionShare](https://onionshare.org/) also shares files over onion services, and offers a GUI, receive mode and website hosting. GhostShare is deliberately narrower: one command shares one file, each on its own onion service, with metadata removed by default.
 
 ## Requirements
 
-- **Tor, running or installed.** GhostShare first tries a running Tor's control port (`127.0.0.1:9051`). If none is running, it starts `tor` from your `PATH` and stops it again when it's done. If neither works, it prints install instructions and exits.
-- **Tor Browser for recipients** (or `curl --socks5-hostname 127.0.0.1:9050 <link>`). A normal browser cannot open a `.onion` link. On phones: Tor Browser for Android, or Onion Browser on iOS. A brand-new onion usually opens within seconds, but now and then the Tor network takes a minute or two to find it; if the link doesn't load at first, wait a moment and try again.
-- **No clearnet fallback.** If Tor is unavailable, GhostShare refuses to share. It never serves a file over the open internet.
+- **Tor, running or installed.** GhostShare first tries a running Tor's control port (`127.0.0.1:9051`). If none answers, it starts `tor` from your `PATH` and stops it when it's done. If neither works, it prints install instructions and exits.
+- **Tor Browser for recipients**, or `curl --socks5-hostname 127.0.0.1:9050 <link>`. A normal browser can't open a `.onion` link. On phones: Tor Browser for Android, or Onion Browser on iOS.
+- **No clearnet fallback.** GhostShare never serves a file over the open internet.
+- **Your computer stays on** until the file has been downloaded. The file is served from your machine, not uploaded anywhere.
 
-Installing Tor:
-
-| System | Command |
+| System | Install Tor |
 | --- | --- |
 | Debian/Ubuntu | `sudo apt install tor` |
 | Fedora | `sudo dnf install tor` |
@@ -32,16 +54,20 @@ Installing Tor:
 
 ## Install
 
+GhostShare is built from source and needs Go 1.26 or newer. There are no prebuilt binaries yet.
+
 ```sh
 CGO_ENABLED=0 go install github.com/computerguymackay/ghostshare@latest
-# or, from a checkout:
+```
+
+Or from a checkout:
+
+```sh
 git clone https://github.com/computerguymackay/GhostShare.git && cd GhostShare
 CGO_ENABLED=0 go build -o ghostshare . && sudo mv ghostshare /usr/local/bin/
 ```
 
-It builds as a single static binary: pure Go, no cgo, no bundled Tor.
-
-Check that GhostShare can find Tor:
+Then check that GhostShare can find Tor:
 
 ```console
 $ ghostshare tor-status
@@ -50,9 +76,23 @@ Tor: spawnable
   found /usr/bin/tor: ghostshare will start it when sharing and stop it on exit.
 ```
 
-`tor-status` reports one of three states: **running** (GhostShare uses that Tor and leaves it running), **spawnable** (GhostShare starts `tor` itself and stops it afterwards), or **missing** (with install instructions).
+It reports **running** (GhostShare uses that Tor and leaves it running), **spawnable** (GhostShare starts `tor` itself and stops it afterwards) or **missing** (with install instructions). If your Tor runs as a system service and the check reports an authentication error, your user needs read access to Tor's auth cookie. On Debian/Ubuntu: `sudo usermod -aG debian-tor $USER`, then log out and back in.
 
 ## Usage
+
+```sh
+ghostshare report.pdf                    # 1 download, expires in 24 hours
+ghostshare album.zip -m 3 -e 2h          # 3 downloads within 2 hours
+ghostshare photo.jpg -q                  # also show a QR code, for a phone
+ghostshare notes.txt -k                  # share as-is, without removing metadata
+link=$(ghostshare build.tar.gz --json | jq -r .url)
+
+ghostshare list                          # active shares and their links
+ghostshare revoke q3V9xA                 # end a share early (6+ character prefix)
+ghostshare stop                          # stop the daemon; unfinished shares are kept
+```
+
+Each share takes 10–60 seconds while its onion service is published, a little longer the first time if GhostShare has to start Tor. GhostShare only prints a link once that onion answers through Tor. Now and then a new link takes a minute or two to open in Tor Browser; if it doesn't load at first, wait a moment and try again.
 
 ```text
 ghostshare <file> [flags]     share a file and print its .onion link
@@ -67,65 +107,66 @@ ghostshare tor-status         report whether Tor is running, spawnable, or missi
 | `-m`, `--max-downloads N` | downloads allowed (default 1; 0 = unlimited, needs `--expires`) |
 | `-e`, `--expires DURATION` | e.g. `30m`, `24h`, `7d` (default `24h`; 0 = never, needs `--max-downloads`) |
 | `-k`, `--keep-metadata` | share the file as-is, without removing metadata |
-| `-i`, `--interactive` | prompt for the options (including whether to strip metadata) |
+| `-i`, `--interactive` | prompt for the options (including whether to remove metadata) |
 | `-q`, `--qr` | show the link as a QR code (on stderr) |
 | `-o`, `--qr-out PATH` | save the QR code as a PNG |
-| `-j`, `--json` | print `{url, token, expires_at, max_downloads}` instead of the bare link |
+| `-j`, `--json` | print `{url, token, expires_at, max_downloads, metadata_stripped}` instead of the bare link |
 | `-f`, `--watch` | follow the daemon log after sharing |
 | `--external-tor` | only use an already-running Tor; never start one |
 
-Short flags take one or two dashes (`-m` and `--m` are the same). Combined short flags like `-iq` are not supported; write `-i -q`.
+Short flags take one or two dashes (`-m` and `--m` are the same). Combined short flags like `-iq` are not supported; write `-i -q`. Only the link (or the JSON) goes to stdout; warnings, summaries and QR codes go to stderr.
 
-Only the link (or the JSON) goes to stdout. Warnings, summaries and QR codes go to stderr, so this works:
+## Security and privacy
 
-```sh
-link=$(ghostshare build.tar.gz --json | jq -r .url)
-```
+### What GhostShare protects
+
+- **Your location.** The file is served through a Tor onion service, so the recipient, and anyone watching the network between you, doesn't learn your IP address. The recipient connects through Tor too, so you don't learn theirs, and the daemon log never records client addresses.
+- **The connection.** Traffic to an onion service is end-to-end encrypted by Tor, even though the link starts with `http://`.
+- **Links between shares.** Every share has its own onion address, so recipients can't connect different shares to each other. When a share ends, its address stops answering instead of showing that you're still online.
+- **File metadata.** Removed by default; see [Metadata](#metadata).
+- **File timestamps.** Downloads carry no `Last-Modified` header.
+- **Onion keys.** Tor is told to discard each onion service's private key, so GhostShare never has it and can't write it to disk.
+
+### What it doesn't protect
+
+- **Anyone with the link can download the file.** The link is the only secret: a v3 onion address plus a random 144-bit token. There is no password. Send it only over a channel you trust, and set a low download limit.
+- **Tor is anonymity, not file encryption.** Whoever downloads the file gets it in the clear. If it must stay confidential even when the link leaks, encrypt it first, for example `age -p file && ghostshare file.age`. GhostShare prints this warning on every share.
+- **The file itself can identify you.** Removing metadata doesn't change what the file shows or says: faces, text, a document's content, a voice. The original filename is kept, so rename the file first if its name gives anything away.
+- **Your computer is online while it shares.** The file is served from your machine, so a recipient with the link can see when it is reachable.
+- **Tor's own limits.** An adversary able to watch traffic at both ends may be able to correlate it. GhostShare adds nothing beyond what Tor provides.
+- **Your own machine.** Until a share ends, `~/.ghostshare` holds its file path, filename and full token (in `state.db`), and the cleaned copy. Finished shares are deleted from the database, but as with any SQLite delete the bytes may remain in the file until overwritten. Anyone with access to your user account can see what you are sharing.
+- **No audit.** GhostShare is early software (0.1.0-dev) and has not been independently reviewed.
 
 ### Metadata
 
-By default, GhostShare removes personal metadata before sharing, using [metakill](https://github.com/computerguymackay/metakill). It writes a cleaned copy of the file into its state directory (`~/.ghostshare/files/`) and serves that, under the original filename. Your original file is only read, never changed. The copy is deleted when the share ends (download limit, expiry, `revoke`, or the original is deleted), and kept, like the rest of the share, across `ghostshare stop` and restarts. Files with nothing to remove (plain text, an already-clean photo) are served directly, without a copy.
+By default, GhostShare writes a cleaned copy of the file into `~/.ghostshare/files/` using [metakill](https://github.com/computerguymackay/metakill), and serves that under the original filename. Your original file is only read, never changed. The copy is deleted when the share ends, and kept across `ghostshare stop` and restarts. Files with nothing to remove (plain text, an already-clean photo) are served directly. The aim is to remove what identifies you and keep what makes the file useful:
 
-The aim is to remove what identifies you while keeping what makes the file useful to the recipient:
+- **Removed:** GPS and location, timestamps, camera and device details (make, model, serial numbers), owner and author names, software and encoder strings, comments, embedded thumbnails, and data hidden after the end of the file.
+- **Kept:** the content; in music and video, the title, artist, album, track number, year (just the year) and cover art (with its own EXIF removed); document titles; photo orientation; colour profiles.
 
-- **Always removed:** GPS and location, timestamps, camera and device details (make, model, serial numbers), owner and author names, software and encoder strings, comments, embedded thumbnails, and anything hidden after the end of the data.
-- **Kept:** the content itself; in music and video, the title, artist, album, track number, year (as just the year) and cover art (with its own EXIF removed); document titles; photo orientation, so pictures aren't shown rotated; and colour profiles, so they look right.
+Supported formats include JPEG, PNG, WebP, HEIC, TIFF, GIF, SVG, PDF, Office (`.docx`, `.xlsx`, `.pptx`), OpenDocument, EPUB, MP3, FLAC, Ogg/Opus, WAV, MP4/MOV, MKV and AVI. Zip and tar archives are cleaned file by file, including archives inside archives; see metakill's README for the full list.
 
-Cover art is kept only when the file you share is audio or video. Inside an archive (a zip of songs, say) it is removed, because the same setting would also keep photos' thumbnails, which can show a picture before it was cropped.
+Details worth knowing:
 
-Supported formats include JPEG, PNG, WebP, HEIC, TIFF, GIF, SVG, PDF, Office (`.docx`, `.xlsx`, `.pptx`), OpenDocument, EPUB, MP3, FLAC, Ogg/Opus, WAV, MP4/MOV, MKV and AVI. Zip and tar archives are cleaned inside, file by file, including photos inside documents and archives inside archives. See metakill's README for the full list.
+- **7z and RAR are repacked as zip.** metakill can only rewrite them with 7-Zip or rar installed, and GhostShare runs no programs besides Tor, so it converts them to zip and cleans that. The link then ends in `.zip`, and stderr says so. Encrypted and multi-volume archives, and archives containing links, are shared as-is with a warning.
+- **Cover art is kept only for audio and video files.** Inside an archive (a zip of songs) it is removed, because the same setting would also keep photos' thumbnails, which can show a picture before it was cropped.
+- **Files that can't be cleaned are shared as-is, with a one-line warning** on stderr, such as `warning: can't remove metadata from .bin files; sharing as-is`. This covers unknown types, signed packages (APK, signed JAR), encrypted PDFs and encrypted files (`.age`, `.gpg`). A share is never refused because of metadata.
+- **Things metakill deliberately leaves alone are reported too**, such as an archive entry under a home folder (`Users/jane/notes.txt`); names inside archives are never changed.
+- **Limits:** encoder settings inside a video's compressed stream (such as x264's) are not touched. Genre, album artist, disc number and lyrics are removed along with other tags. The cleaned copy needs as much disk space as the file, and twice that while it is being made.
 
-**7z and RAR archives are repacked as zip**: metakill can only rewrite them with 7-Zip or rar installed, and GhostShare doesn't run other programs, so it converts them to zip first and cleans that. The link then ends in `.zip` instead of `.7z`/`.rar`, and stderr says so. The zip may be larger than a solid 7z. Encrypted and multi-volume archives, and archives containing links, can't be repacked and are shared as-is with a warning.
+Turn cleaning off for one share with `-k` / `--keep-metadata` (GhostShare warns that metadata is not being removed), or for all shares with `strip_metadata = false` in the config. `--json` includes `"metadata_stripped"`, and `ghostshare list` has a METADATA column.
 
-Files that can't be cleaned are shared as-is with a one-line warning on stderr, for example `warning: can't remove metadata from .bin files; sharing as-is`. That covers unknown types, signed packages (APK, signed JAR) that would break if rewritten, encrypted PDFs, and encrypted files (`.age`, `.gpg`; the warning suggests stripping before encrypting next time). A share is never refused because of metadata: if cleaning fails, the original is shared with a warning. When metakill notices something it deliberately leaves alone, such as an archive entry under a home folder (`Users/jane/notes.txt`; entry names are never changed), that is shown as a warning too.
+## How it works
 
-Limits: settings embedded in a video's encoded stream (such as x264's) are not touched. Genre, album artist, disc number and lyrics are removed along with other tags. The cleaned copy is made when you share, so later edits to the original are not picked up, and it takes as much disk space as the file (twice that while it is being made).
+**Shares end.** A completed download counts once. A broken download doesn't count, and finishing it later counts once. Resumed (Range) and HEAD requests never count. If two people finish on the last slot at the same moment, both may succeed. When a share ends (download limit, expiry, `revoke`, or the file is deleted), its onion service is removed from Tor at once; downloads already in progress may finish. Setting both `--max-downloads 0` and `--expires 0` is refused, so every share ends.
 
-Turn stripping off for one share with `-k` / `--keep-metadata` (a warning says metadata is not being removed), or for all shares with `strip_metadata = false` in the config. `--json` output includes `"metadata_stripped": true|false`, and `ghostshare list` has a METADATA column.
+**The daemon.** The first share starts a background daemon, which connects to Tor, starting `tor` if needed. Later shares reuse the daemon and the same Tor, but each gets a new onion service. The daemon exits 45 seconds after the last share ends, removing its onion services. If GhostShare started Tor, that Tor is stopped too; a Tor you were already running is left alone.
 
-### How shares end
-
-A share always ends: setting both `--max-downloads 0` and `--expires 0` is refused.
-
-A completed download counts once. A broken download doesn't count, and finishing it later counts once. Resumed downloads (Range requests) and HEAD requests never count. If two people finish downloading at the same moment on the last slot, both may succeed.
-
-When a share ends (download limit, expiry, `revoke`, or the file is deleted), its onion service is removed from Tor at once. Tor Browser then reports that the site can't be found. Downloads already in progress may finish.
-
-### One onion per file
-
-Every share gets its own `.onion` address and its own token, so two recipients can't tell that their files came from the same person, and a token only works on its own address. The cost is time: each share waits for its own onion service to be published and reachable, which usually takes 10–60 seconds. No link is printed until the onion answers through Tor.
-
-### The daemon
-
-The first share starts a background daemon, which connects to Tor (starting `tor` if needed). Later shares reuse the daemon and the same Tor, but each still gets a new onion service.
-
-The daemon exits by itself 45 seconds after the last share ends, removing all its onion services. If GhostShare started Tor, that Tor is stopped too. A Tor you were already running is left alone.
-
-**Restarts change the addresses.** After `ghostshare stop`, a crash, or a reboot, unfinished shares come back the next time the daemon starts, each at a new `.onion` address, because onion keys are never stored. `ghostshare list` shows their new links.
+**Restarts change addresses.** After `ghostshare stop`, a crash or a reboot, unfinished shares come back when the daemon next starts, each at a new `.onion` address, because onion keys are never stored. `ghostshare list` shows the new links.
 
 ## Configuration
 
-On first run, GhostShare writes `~/.ghostshare/config.toml` (or `$GHOSTSHARE_HOME/config.toml`):
+On first run, GhostShare writes `~/.ghostshare/config.toml` (or `$GHOSTSHARE_HOME/config.toml`). Flags override it.
 
 ```toml
 [share]
@@ -134,8 +175,6 @@ default_max_downloads = 1
 strip_metadata        = true
 ```
 
-Flags override the config. There are no network settings; QuickShare's `[server]` section is reported as unused if present.
-
 | Environment variable | Meaning |
 | --- | --- |
 | `GHOSTSHARE_HOME` | state directory (default `~/.ghostshare`) |
@@ -143,18 +182,7 @@ Flags override the config. There are no network settings; QuickShare's `[server]
 | `GHOSTSHARE_TOR_SOCKS` | SOCKS address for the reachability check (default: ask Tor) |
 | `GHOSTSHARE_GRACE`, `GHOSTSHARE_TICK` | daemon idle timeout (45s) and expiry check interval (10s) |
 
-The state directory holds `state.db` (the shares), `files/` (metadata-stripped copies), `tor/` (the data folder of a Tor that GhostShare started; removed when it stops, or at the next start if the daemon was killed), `ghostshare.log` (the daemon log), and the daemon's lock and control socket.
-
-## Security and privacy
-
-- **Tor is anonymity, not encryption.** The onion service hides where the file is served from, but anyone who has the link can download the file. Encrypt sensitive files first, for example with `age -p`.
-- **The link is the secret.** Each link has its own onion address and a random 144-bit token. Share it only over a channel you trust.
-- **Shares are unlinkable.** Different shares never share an onion address, so recipients can't connect them to each other, and a finished share's address stops answering instead of confirming you're still online.
-- **Metadata stripped by default.** See [Metadata](#metadata) for what is and isn't removed.
-- **No file timestamps.** Downloads carry no `Last-Modified` header, so recipients don't learn when the file was last changed.
-- **No onion keys on disk.** Tor is told to discard the onion service's private key, so GhostShare never has it and can't store it.
-- **Minimal logs.** The daemon log never records client addresses or onion addresses, and shows tokens only as their first 8 characters.
-- **Tor control access.** If your Tor runs as a system service and `tor-status` reports an authentication error, your user needs read access to Tor's auth cookie. On Debian/Ubuntu: `sudo usermod -aG debian-tor $USER`, then log out and back in.
+The state directory holds `state.db` (the shares), `files/` (cleaned copies), `tor/` (the data folder of a Tor that GhostShare started; removed when it stops, or at the next start if the daemon was killed), `ghostshare.log` (the daemon log; tokens appear only as their first 8 characters) and the daemon's lock and control socket.
 
 ## Building and testing
 
@@ -178,11 +206,11 @@ GHOSTSHARE_TOR_TEST=1 go test -tags=tortest -v ./...
 GhostShare is the Tor-only sibling of [QuickShare](https://github.com/computerguymackay/QuickShare). Both are by the same author.
 
 - **Transport:** QuickShare serves files over clearnet HTTP from a machine the internet can reach. GhostShare serves each file over its own temporary Tor onion service, so neither side needs a public IP or reveals one.
-- **Shared model:** GhostShare inherits QuickShare's background daemon, control socket, token format, download-counting rules, flag names, and config layout. Code ported from QuickShare is marked with an attribution comment at the top of the file. GhostShare's own addition is the Tor transport (`tor.go`) and its warnings.
+- **Shared model:** GhostShare inherits QuickShare's background daemon, control socket, token format, download-counting rules, flag names and config layout. Code ported from QuickShare is marked with an attribution comment at the top of the file. GhostShare adds the Tor transport (`tor.go`), metadata removal and its warnings.
 - **Shared license:** both projects use the same MIT license. Neither is relicensed without the other.
-- **How fixes flow:** the two codebases are kept structurally aligned so fixes can be cherry-picked in either direction. A commit that ports a fix cites the other project. A commit that changes inherited behavior is marked `[diverges from QuickShare]`.
+- **How fixes flow:** the two codebases are kept structurally aligned so fixes can be cherry-picked in either direction. A commit that ports a fix cites the other project. A commit that changes inherited behaviour is marked `[diverges from QuickShare]`.
 
-They are not competitors. They are two answers to "share this file with one command", split on transport.
+They are not competitors: they are two answers to "share this file with one command", split on transport.
 
 ## License
 

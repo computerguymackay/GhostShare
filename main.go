@@ -57,7 +57,7 @@ Share flags:
   -i, --interactive       prompt for options
   -q, --qr                show the link as a QR code (on stderr)
   -o, --qr-out PATH       save the QR code as a PNG
-  -j, --json              print {url, token, expires_at, max_downloads}
+  -j, --json              print {url, token, expires_at, max_downloads, metadata_stripped}
   -f, --watch             follow the daemon log after sharing
       --external-tor      only use an already-running Tor; never start one
 
