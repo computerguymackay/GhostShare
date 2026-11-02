@@ -294,8 +294,10 @@ func TestCLICrashRestoresSharesOnNewOnion(t *testing.T) {
 	e := newCLIEnv(t)
 	f := testFile(t, "data")
 	first := e.share(t, f, "--max-downloads", "2")
-	expired := e.share(t, f, "--expires", "1s")
-	time.Sleep(1100 * time.Millisecond)
+	// --expires rounds down to a whole second, so 1s could end the share
+	// before its onion is published; 2s always leaves at least 1s.
+	expired := e.share(t, f, "--expires", "2s")
+	time.Sleep(2100 * time.Millisecond)
 
 	syscall.Kill(e.daemonPID(t), syscall.SIGKILL)
 	e.waitDaemonGone(t, 2*time.Second)

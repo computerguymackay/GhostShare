@@ -320,8 +320,12 @@ func TestOnionIsRemovedOnExpiry(t *testing.T) {
 	p := testPaths(t)
 	ft := newFakeTor(t, "AUTH METHODS=NULL")
 	rd := startTestDaemon(t, p, ft, time.Minute)
-	_, link := rd.add(t, testFile(t, "a"), 1, time.Now().Add(time.Second).Unix())
-	time.Sleep(1200 * time.Millisecond)
+	// Expiry is in whole seconds, so now+2 is 1-2s away: always time to
+	// publish the onion first. (now+1 could be a few ms away, and the share
+	// would end before its onion was ready.)
+	exp := time.Now().Unix() + 2
+	_, link := rd.add(t, testFile(t, "a"), 1, exp)
+	time.Sleep(time.Until(time.Unix(exp, 0)) + 200*time.Millisecond)
 	rd.waitGone(t, link)
 	if n := ft.onionCount(); n != 0 {
 		t.Fatalf("%d onions after the only share expired, want 0", n)
