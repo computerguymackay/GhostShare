@@ -3,8 +3,8 @@ GhostShare. --- What This Is GhostShare is a standalone Go CLI that
 shares a file anonymously over the Tor network via a temporary onion 
 service. One command, one .onion link. No accounts, no relay, no 
 third-party service, no bundled Tor. Elevator pitch: ghostshare 
-report.pdf → prints http://abc...xyz.onion/q3V9x.../report.pdf → 
-recipient opens it in Tor Browser → file downloads → link dies. 
+report.pdf → prints http://abc...xyz.onion/q3V9x... → 
+recipient opens it in Tor Browser → report.pdf downloads → link dies. 
 Positioning: This is not a general-purpose anonymous sharing tool and 
 not an OnionShare competitor. It is a small, explicit, CLI-first tool 
 for users who already know what Tor is and want to share a file 
@@ -164,7 +164,7 @@ nothing but Tor. Encrypted, multi-volume and link-holding archives are
 shared as-is. metakill's own warnings (e.g. home-folder paths inside 
 archives) are shown. All work files stay in ~/.ghostshare/files/<token>.tmp 
 (CleanFile stages next to its input), never in the system temp dir. 
-· Never reveal file timestamps: no Last-Modified header (ServeContent 
+· Links never show the filename: the path is /<token> and nothing else (anything after it is a 410). The recipient gets the name from Content-Disposition: attachment (never inline, so HTML/SVG cannot render), with an ASCII filename= fallback and a UTF-8 filename*=, after removing quotes, backslashes, control characters and bidi overrides (contentDisposition in server.go). The name is sh.Filename: what was given to the CLI, or the .zip name after a 7z/RAR repack. [diverges from QuickShare] (changed 2026-11-02) · Never reveal file timestamps: no Last-Modified header (ServeContent 
 gets time.Time{}), and zip entry times in stripped copies are reset 
 (metakill). --- 
 Download-Counting Semantics (match QuickShare exactly) · A completed 

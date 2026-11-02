@@ -269,8 +269,9 @@ func linkParts(t *testing.T, link string) (onion, token string) {
 	t.Helper()
 	rest, ok := strings.CutPrefix(link, "http://")
 	parts := strings.Split(rest, "/")
-	if !ok || len(parts) != 3 || !strings.HasSuffix(parts[0], ".onion") || len(parts[0]) != 56+len(".onion") {
-		t.Fatalf("%q is not an http://<v3>.onion/<token>/<file> link", link)
+	if !ok || len(parts) != 2 || !strings.HasSuffix(parts[0], ".onion") || len(parts[0]) != 56+len(".onion") ||
+		len(parts[1]) != 24 {
+		t.Fatalf("%q is not an http://<v3>.onion/<token> link", link)
 	}
 	return parts[0], parts[1]
 }

@@ -285,7 +285,7 @@ func TestEachShareGetsItsOwnOnion(t *testing.T) {
 		t.Fatalf("%d onion services for two shares, want 2", n)
 	}
 	// A token only works on its own onion.
-	if code := rd.get(t, "http://"+onionA+"/"+b.Token+"/file.txt"); code != 410 {
+	if code := rd.get(t, "http://"+onionA+"/"+b.Token); code != 410 {
 		t.Fatalf("share B's token on share A's onion: %d, want 410", code)
 	}
 	if resp, _ := ctrlCall(p, ctrlRequest{Op: "list"}); len(resp.Shares) != 2 {

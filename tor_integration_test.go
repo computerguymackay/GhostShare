@@ -83,7 +83,7 @@ func TestTorShareEndToEnd(t *testing.T) {
 	t.Logf("reachable %v later", time.Since(start).Round(time.Second))
 
 	client := onionClient(t, socks)
-	resp, err := client.Get("http://" + host + "/" + tok + "/file.txt")
+	resp, err := client.Get("http://" + host + "/" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestTorShareEndToEnd(t *testing.T) {
 	if resp.StatusCode != 200 || string(body) != content {
 		t.Fatalf("download: %d %q", resp.StatusCode, body)
 	}
-	resp, err = client.Get("http://" + host + "/" + tok + "/file.txt")
+	resp, err = client.Get("http://" + host + "/" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}

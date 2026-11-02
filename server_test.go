@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -53,7 +54,7 @@ func (e *serverEnv) count(t *testing.T, tok string) int {
 
 func (e *serverEnv) do(t *testing.T, method, tok string, hdr map[string]string) (*http.Response, string) {
 	t.Helper()
-	req, _ := http.NewRequest(method, e.srv.URL+"/"+tok+"/file.txt", nil)
+	req, _ := http.NewRequest(method, e.srv.URL+"/"+tok, nil)
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
@@ -84,7 +85,7 @@ func TestFullGetCounts(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, resp.Header.Get(k), v)
 		}
 	}
-	if !strings.Contains(resp.Header.Get("Content-Disposition"), `filename=file.txt`) {
+	if !strings.Contains(resp.Header.Get("Content-Disposition"), `attachment; filename="file.txt"; filename*=UTF-8''file.txt`) {
 		t.Errorf("Content-Disposition = %q", resp.Header.Get("Content-Disposition"))
 	}
 }
@@ -173,7 +174,7 @@ func TestInterruptedThenRetriedCountsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.WriteString(conn, "GET /"+tok+"/big.bin HTTP/1.1\r\nHost: x\r\n\r\n")
+	io.WriteString(conn, "GET /"+tok+" HTTP/1.1\r\nHost: x\r\n\r\n")
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil || resp.StatusCode != 200 {
@@ -191,7 +192,7 @@ func TestInterruptedThenRetriedCountsOnce(t *testing.T) {
 		t.Fatalf("count after interrupted download = %d, want 0", c)
 	}
 
-	resp2, err := http.Get(e.srv.URL + "/" + tok + "/big.bin")
+	resp2, err := http.Get(e.srv.URL + "/" + tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +258,7 @@ func TestStoredFilenameIsUsed(t *testing.T) {
 	tok, _ := newToken()
 	e.store.Add(Share{Token: tok, Path: testFile(t, content), Filename: "report.pdf", MaxDownloads: 1})
 	resp, _ := e.do(t, "GET", tok, nil)
-	if !strings.Contains(resp.Header.Get("Content-Disposition"), "filename=report.pdf") {
+	if !strings.Contains(resp.Header.Get("Content-Disposition"), `filename="report.pdf"`) {
 		t.Fatalf("Content-Disposition = %q", resp.Header.Get("Content-Disposition"))
 	}
 }
@@ -274,7 +275,7 @@ func TestLogHasNoAddressesOrFullTokens(t *testing.T) {
 	tok, _ := newToken()
 	st.Add(Share{Token: tok, Path: testFile(t, content), MaxDownloads: 1})
 	for i := 0; i < 2; i++ { // one 200, one 410
-		resp, err := http.Get(srv.URL + "/" + tok + "/file.txt")
+		resp, err := http.Get(srv.URL + "/" + tok)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -351,5 +352,73 @@ func TestServesStrippedCopyUnderOriginalName(t *testing.T) {
 	os.Remove(orig)
 	if resp, _ := e.do(t, "GET", tok, nil); resp.StatusCode != 410 {
 		t.Fatalf("after deleting the original: %d, want 410", resp.StatusCode)
+	}
+}
+
+// Links are /<token> only: the filename isn't in the path, and anything
+// after the token is refused.
+func TestLinkPathIsTokenOnly(t *testing.T) {
+	if got := shareURL("abc.onion", Share{Token: "q3V9xAAAAAAAAAAAAAAAAAAA", Filename: "report.pdf"}); got != "http://abc.onion/q3V9xAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("shareURL = %q", got)
+	}
+
+	e := newServerEnv(t)
+	tok := e.share(t, testFile(t, content), 5, 0)
+	for _, path := range []string{"/" + tok + "/file.txt", "/" + tok + "/"} {
+		resp, err := http.Get(e.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		<-e.done
+		if resp.StatusCode != 410 {
+			t.Errorf("GET %s = %d, want 410", path, resp.StatusCode)
+		}
+	}
+	if c := e.count(t, tok); c != 0 {
+		t.Fatalf("count = %d, want 0", c)
+	}
+	if resp, body := e.do(t, "GET", tok, nil); resp.StatusCode != 200 || body != content {
+		t.Fatalf("GET /<token> = %d %q", resp.StatusCode, body)
+	}
+}
+
+func TestNonASCIIFilenameIsSentAsUTF8(t *testing.T) {
+	e := newServerEnv(t)
+	tok, _ := newToken()
+	e.store.Add(Share{Token: tok, Path: testFile(t, content), Filename: "Résumé 履歴書.pdf", MaxDownloads: 1})
+	resp, _ := e.do(t, "GET", tok, nil)
+	want := `attachment; filename="R_sum_ ___.pdf"; filename*=UTF-8''R%C3%A9sum%C3%A9%20%E5%B1%A5%E6%AD%B4%E6%9B%B8.pdf`
+	cd := resp.Header.Get("Content-Disposition")
+	if cd != want {
+		t.Fatalf("Content-Disposition = %q, want %q", cd, want)
+	}
+	if _, params, err := mime.ParseMediaType(cd); err != nil || params["filename"] != "Résumé 履歴書.pdf" {
+		t.Fatalf("parsed filename = %q (%v), want the original name", params["filename"], err)
+	}
+}
+
+func TestContentDispositionSanitizesFilename(t *testing.T) {
+	for _, c := range []struct{ name, want string }{
+		{"report.pdf", `attachment; filename="report.pdf"; filename*=UTF-8''report.pdf`},
+		{"a\"b.txt", `attachment; filename="ab.txt"; filename*=UTF-8''ab.txt`},
+		{"a\\b.txt", `attachment; filename="ab.txt"; filename*=UTF-8''ab.txt`},
+		{"x.txt\r\nSet-Cookie: s=1", `attachment; filename="x.txtSet-Cookie: s=1"; filename*=UTF-8''x.txtSet-Cookie%3A%20s%3D1`},
+		{"tab\there\x00\x7f.txt", `attachment; filename="tabhere.txt"; filename*=UTF-8''tabhere.txt`},
+		{"photo\u202egpj.exe", `attachment; filename="photogpj.exe"; filename*=UTF-8''photogpj.exe`},
+		{"bad\xffutf8.txt", `attachment; filename="badutf8.txt"; filename*=UTF-8''badutf8.txt`},
+		{"semi;colon 100%.txt", `attachment; filename="semi;colon 100%.txt"; filename*=UTF-8''semi%3Bcolon%20100%25.txt`},
+		{"\r\n\"", `attachment; filename="download"; filename*=UTF-8''download`},
+	} {
+		got := contentDisposition(c.name)
+		if got != c.want {
+			t.Errorf("contentDisposition(%q) =\n  %q\nwant\n  %q", c.name, got, c.want)
+		}
+		if strings.ContainsAny(got, "\r\n\x00") {
+			t.Errorf("contentDisposition(%q) has a control character: %q", c.name, got)
+		}
+		if _, _, err := mime.ParseMediaType(got); err != nil {
+			t.Errorf("contentDisposition(%q) = %q doesn't parse: %v", c.name, got, err)
+		}
 	}
 }

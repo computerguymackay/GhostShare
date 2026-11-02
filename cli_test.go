@@ -488,8 +488,8 @@ func TestCLIPhase4ReportPDF(t *testing.T) {
 		t.Fatal(errOut)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 1 || !strings.HasSuffix(lines[0], "/report.pdf") {
-		t.Fatalf("stdout = %q, want only the link", out)
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "http://") || strings.Contains(lines[0], "report") {
+		t.Fatalf("stdout = %q, want only the link, without the filename", out)
 	}
 	link := lines[0]
 	linkParts(t, link)
@@ -841,7 +841,8 @@ func TestCLISharesSevenZipAsCleanZip(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, errOut := e.shareJSON(t, src)
-	if !v.MetadataStripped || !strings.HasSuffix(v.URL, "/bundle.zip") {
+	linkParts(t, v.URL)
+	if !v.MetadataStripped {
 		t.Fatalf("url %s, metadata_stripped %v", v.URL, v.MetadataStripped)
 	}
 	if !strings.Contains(errOut, "bundle.7z was repacked as bundle.zip so its metadata could be removed") {
@@ -851,7 +852,7 @@ func TestCLISharesSevenZipAsCleanZip(t *testing.T) {
 		t.Errorf("stderr doesn't warn about the home-folder entry name:\n%s", errOut)
 	}
 	resp, body := e.fetch(t, v.URL)
-	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "filename=bundle.zip") && !strings.Contains(cd, `filename="bundle.zip"`) {
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, `filename="bundle.zip"`) {
 		t.Errorf("Content-Disposition = %q", cd)
 	}
 	if _, err := zip.NewReader(bytes.NewReader(body), int64(len(body))); err != nil {

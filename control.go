@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -113,7 +112,9 @@ func resolveToken(shares []Share, q string) (string, error) {
 	}
 }
 
-// shareURL is the link for a share on the given onion host.
+// shareURL is the link for a share on the given onion host. The path is the
+// token alone, so the link doesn't reveal the filename; the recipient gets
+// the name from Content-Disposition. [diverges from QuickShare]
 func shareURL(onion string, sh Share) string {
-	return "http://" + onion + "/" + sh.Token + "/" + url.PathEscape(sh.Filename)
+	return "http://" + onion + "/" + sh.Token
 }

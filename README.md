@@ -10,10 +10,10 @@ publishing a new onion service for this file (this can take a minute)…
 warning: Tor provides anonymity, not file encryption. Anyone with this link can download the file. Encrypt sensitive files first (e.g. `age -p file && ghostshare file.age`).
 sharing holiday.jpg (3.4 MiB) · 1 download, expires 2026-11-01 14:02 UTC · metadata removed
 the recipient must open this link in Tor Browser
-http://abc...xyz.onion/q3V9x.../holiday.jpg
+http://abc...xyz.onion/q3V9xK2mT8wR4nLp7sYd1fHc
 ```
 
-The recipient opens the link in Tor Browser and the file downloads. Neither side learns the other's IP address. The photo they receive has no GPS position, camera details or timestamps.
+The recipient opens the link in Tor Browser and the file downloads, saved as `holiday.jpg`. Neither side learns the other's IP address. The photo they receive has no GPS position, camera details or timestamps.
 
 ## Why use it
 
@@ -133,6 +133,7 @@ Short flags take one or two dashes (`-m` and `--m` are the same). Combined short
 - **The connection.** Traffic to an onion service is end-to-end encrypted by Tor, even though the link starts with `http://`.
 - **Links between shares.** Every share has its own onion address, so recipients can't connect different shares to each other. When a share ends, its address stops answering instead of showing that you're still online.
 - **File metadata.** Removed by default; see [Metadata](#metadata).
+- **Filename.** The link is the onion address plus a random token, nothing else, so it doesn't show what you're sharing. The browser learns the filename only when it downloads the file.
 - **File timestamps.** Downloads carry no `Last-Modified` header.
 - **Onion keys.** Tor is told to discard each onion service's private key, so GhostShare never has it and can't write it to disk.
 
@@ -140,7 +141,8 @@ Short flags take one or two dashes (`-m` and `--m` are the same). Combined short
 
 - **Anyone with the link can download the file.** The link is the only secret: a v3 onion address plus a random 144-bit token. There is no password. Send it only over a channel you trust, and set a low download limit.
 - **Tor is anonymity, not file encryption.** Whoever downloads the file gets it in the clear. If it must stay confidential even when the link leaks, encrypt it first, for example `age -p file && ghostshare file.age`. GhostShare prints this warning on every share.
-- **The file itself can identify you.** Removing metadata doesn't change what the file shows or says: faces, text, a document's content, a voice. The original filename is kept, so rename the file first if its name gives anything away.
+- **The link hides the filename, not the file.** Anyone with the link still downloads the file in the clear, under its original name. If its content matters, encrypt it first (`age -p file && ghostshare file.age`).
+- **The file itself can identify you.** Removing metadata doesn't change what the file shows or says: faces, text, a document's content, a voice. The link doesn't show the filename, but the recipient's download is saved under the original name (as you typed it to `ghostshare`), so rename the file first if its name gives anything away.
 - **Your computer is online while it shares.** The file is served from your machine, so a recipient with the link can see when it is reachable.
 - **Tor's own limits.** An adversary able to watch traffic at both ends may be able to correlate it. GhostShare adds nothing beyond what Tor provides.
 - **Your own machine.** Until a share ends, `~/.ghostshare` holds its file path, filename and full token (in `state.db`), and the cleaned copy. Finished shares are deleted from the database, but as with any SQLite delete the bytes may remain in the file until overwritten. Anyone with access to your user account can see what you are sharing.

@@ -4,22 +4,26 @@
 // "Never log IPs"), the download name comes from the stored filename, and
 // no Last-Modified header is sent (it would reveal the file's mtime). A
 // share with a metadata-stripped copy serves the copy, under the original
-// filename.
+// filename. Links are /<token> only, with no filename in the path; the
+// name reaches the recipient through Content-Disposition (see
+// contentDisposition).
 // The download-counting rule is unchanged.
 
 package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
-	"mime"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // FileServer serves shares by token and counts completed downloads.
@@ -55,14 +59,18 @@ func (fs *FileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// URL shape: /<token> or /<token>/<filename>
-	token, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	// URL shape: /<token>, nothing else.
+	token, rest, extra := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	gone := func(reason string) {
 		fs.log.Printf("%s %s → 410 (%s)", r.Method, shortToken(token), reason)
 		http.Error(w, "this link has expired or does not exist", http.StatusGone)
 	}
 	if token == "" {
 		gone("no token")
+		return
+	}
+	if extra || rest != "" {
+		gone("unknown path")
 		return
 	}
 
@@ -100,7 +108,7 @@ func (fs *FileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	h.Set("Content-Disposition", contentDisposition(name))
 
 	cw := &countingWriter{ResponseWriter: w, status: http.StatusOK}
 	// A zero modtime means no Last-Modified header, so the file's mtime
@@ -179,3 +187,48 @@ func (c *countingWriter) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (c *countingWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
+// contentDisposition tells the browser to save the file under name, never
+// to display it (so a shared HTML or SVG file can't run in the recipient's
+// browser). Quotes, backslashes, CR/LF and other control characters are
+// removed first, and so are bidi overrides, which can make "photo\u202egpj.exe"
+// display as "photoexe.jpg". filename= is an ASCII fallback (other characters become
+// "_"); filename*= carries the full UTF-8 name (RFC 6266, RFC 5987).
+func contentDisposition(name string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r == '"' || r == '\\' || r == utf8.RuneError ||
+			unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, name)
+	clean = strings.TrimSpace(clean)
+	if clean == "" {
+		clean = "download"
+	}
+
+	ascii := strings.Map(func(r rune) rune {
+		if r > unicode.MaxASCII {
+			return '_'
+		}
+		return r
+	}, clean)
+	var enc strings.Builder
+	for _, b := range []byte(clean) {
+		if isAttrChar(b) {
+			enc.WriteByte(b)
+		} else {
+			fmt.Fprintf(&enc, "%%%02X", b)
+		}
+	}
+	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + enc.String()
+}
+
+// isAttrChar reports whether b may appear unescaped in an RFC 5987 value.
+func isAttrChar(b byte) bool {
+	switch {
+	case 'a' <= b && b <= 'z', 'A' <= b && b <= 'Z', '0' <= b && b <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$&+-.^_`|~", b) >= 0
+}
