@@ -180,9 +180,26 @@ type torSession struct {
 	controlAddr string
 	socksAddr   string // override from env, may be empty
 
-	mu       sync.Mutex // guards closed, so onions and the session close in any order
+	// mu is held for every control-port command, and guards closed, so
+	// onions and the session close in any order. bine deadlocks when two
+	// goroutines send commands at once (each takes its read lock and its
+	// textproto pipeline turn in an order that can cross), which happened
+	// with two shares publishing together.
+	mu       sync.Mutex
 	closed   bool
 	closeErr error
+}
+
+var errSessionClosed = errors.New("the Tor session is closed")
+
+// control runs fn, which sends control-port commands, on its own.
+func (s *torSession) control(fn func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errSessionClosed
+	}
+	return fn()
 }
 
 // onionListener is the session's onion service as a net.Listener. Closing
@@ -303,8 +320,8 @@ func spawnTor(path, base string) (*tor.Tor, *torProcess, error) {
 // check that follows doesn't look it up too early.
 func (s *torSession) Listen(ctx context.Context) (*onionListener, error) {
 	// A spawned Tor starts with its network off; turn it on and wait for
-	// bootstrap. For a running Tor this is a no-op.
-	if err := s.t.EnableNetwork(ctx, true); err != nil {
+	// bootstrap (other shares wait too). For a running Tor this is a no-op.
+	if err := s.control(func() error { return s.t.EnableNetwork(ctx, true) }); err != nil {
 		return nil, fmt.Errorf("connect Tor to the network: %w", err)
 	}
 
@@ -312,34 +329,39 @@ func (s *torSession) Listen(ctx context.Context) (*onionListener, error) {
 	// missed. bine relays events with a blocking send, so the buffer is
 	// large and the listener is removed before we stop reading it.
 	events := make(chan control.Event, 256)
-	if err := s.t.Control.AddEventListener(events, control.EventCodeHSDesc); err != nil {
+	if err := s.control(func() error { return s.t.Control.AddEventListener(events, control.EventCodeHSDesc) }); err != nil {
 		return nil, fmt.Errorf("watch onion publication: %w", err)
 	}
 	evCtx, stopEvents := context.WithCancel(ctx)
 	go s.t.Control.HandleEvents(evCtx)
 	defer func() {
-		s.t.Control.RemoveEventListener(events, control.EventCodeHSDesc)
+		s.control(func() error { return s.t.Control.RemoveEventListener(events, control.EventCodeHSDesc) })
 		stopEvents()
 	}()
 
-	svc, err := s.t.Listen(ctx, &tor.ListenConf{
-		Version3:    true,
-		DiscardKey:  true,
-		RemotePorts: []int{onionPort},
-		NoWait:      true, // waitPublished below does the waiting
+	var svc *tor.OnionService
+	err := s.control(func() (err error) {
+		svc, err = s.t.Listen(ctx, &tor.ListenConf{
+			Version3:    true,
+			DiscardKey:  true,
+			RemotePorts: []int{onionPort},
+			NoWait:      true, // waitPublished below does the waiting
+		})
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create onion service: %w", err)
 	}
+	onion := &onionListener{OnionService: svc, sess: s}
 	if svc.Key != nil {
-		svc.Close()
+		onion.Close()
 		return nil, errors.New("create onion service: Tor returned a private key despite DiscardPK; refusing to continue")
 	}
 	if err := waitPublished(ctx, events, svc.ID); err != nil {
-		svc.Close()
+		onion.Close()
 		return nil, fmt.Errorf("publish onion service: %w", err)
 	}
-	return &onionListener{OnionService: svc, sess: s}, nil
+	return onion, nil
 }
 
 // Tor uploads each onion's two descriptors to 8 directory servers each,
@@ -404,10 +426,15 @@ func (s *torSession) socks() string {
 	if s.socksAddr != "" {
 		return s.socksAddr
 	}
-	if info, err := s.t.Control.GetInfo("net/listeners/socks"); err == nil && len(info) == 1 {
-		if addr := firstTCPListener(info[0].Val); addr != "" {
-			return addr
+	addr := ""
+	s.control(func() error {
+		if info, err := s.t.Control.GetInfo("net/listeners/socks"); err == nil && len(info) == 1 {
+			addr = firstTCPListener(info[0].Val)
 		}
+		return nil
+	})
+	if addr != "" {
+		return addr
 	}
 	return defaultSocksAddr
 }

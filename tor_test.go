@@ -371,3 +371,45 @@ func TestWaitPublishedHonoursContext(t *testing.T) {
 		t.Fatal("no error after the context ended")
 	}
 }
+
+// Many shares publishing and ending at once must not deadlock the control
+// connection. bine hangs for good if two goroutines send commands together,
+// so every command goes through torSession.control.
+func TestConcurrentOnionsDontDeadlock(t *testing.T) {
+	ft := newFakeTor(t, "AUTH METHODS=NULL")
+	sess, err := connectTor(torEnv{controlAddr: ft.controlAddr(), lookPath: missingTor}, true, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for round := 0; round < 10; round++ {
+			errs := make(chan error, 8)
+			for i := 0; i < 8; i++ {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					o, err := sess.Listen(ctx)
+					if err == nil {
+						sess.socks()
+						err = o.Close()
+					}
+					errs <- err
+				}()
+			}
+			for i := 0; i < 8; i++ {
+				if err := <-errs; err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	}()
+	select {
+	case <-done:
+		sess.Close()
+	case <-time.After(30 * time.Second):
+		// Not closing sess: Close would hang on the stuck connection too.
+		t.Fatal("control connection deadlocked")
+	}
+}
