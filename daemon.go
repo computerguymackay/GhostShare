@@ -423,26 +423,30 @@ func (d *Daemon) prune() {
 // delete ghostshare's own copies, never a user's file.
 func copyPath(p Paths, token string) string { return filepath.Join(p.Files, token) }
 
-// prepareCopy strips metadata from src into the state directory. It
-// returns the path to serve ("" for the original), whether the served file
-// is metadata-free, and a warning for the user. It never fails a share.
-func (d *Daemon) prepareCopy(token, src string) (servePath string, stripped bool, warning string) {
+// prepareCopy strips metadata from src into the state directory. When
+// res.Copied is set, copyPath(token) is the file to serve. It never fails a
+// share. Work files go in <token>.tmp next to the copy, so a crash leaves
+// nothing outside the state directory and the next sweep removes it.
+func (d *Daemon) prepareCopy(token, src string) stripResult {
 	d.copiesMu.Lock()
 	d.preparing[token] = true
 	d.copiesMu.Unlock()
 	if err := os.MkdirAll(d.p.Files, 0o700); err != nil {
-		return "", false, fmt.Sprintf("couldn't create %s for the stripped copy (%v); sharing as-is", d.p.Files, err)
+		return stripResult{Warning: fmt.Sprintf("couldn't create %s for the stripped copy (%v); sharing as-is", d.p.Files, err)}
 	}
-	dst := copyPath(d.p, token)
-	res := stripMetadata(src, dst)
+	work := copyPath(d.p, token) + ".tmp"
+	defer os.RemoveAll(work)
+	res := stripMetadata(src, copyPath(d.p, token), work)
 	switch {
+	case res.Copied && res.Filename != "":
+		d.log.Printf("share %s: repacked as zip, metadata removed", shortToken(token))
 	case res.Copied:
 		d.log.Printf("share %s: metadata removed", shortToken(token))
-		return dst, true, res.Warning
-	case res.Warning != "":
-		d.log.Printf("share %s: sharing as-is (%s)", shortToken(token), res.Warning)
 	}
-	return "", res.Stripped, res.Warning
+	if res.Warning != "" {
+		d.log.Printf("share %s: %s", shortToken(token), res.Warning)
+	}
+	return res
 }
 
 // donePreparing lets sweepCopies see token's copy again, once its share
@@ -477,7 +481,7 @@ func (d *Daemon) sweepCopies() {
 		if (live[tok] && finished) || d.preparing[tok] {
 			continue
 		}
-		os.Remove(filepath.Join(d.p.Files, e.Name()))
+		os.RemoveAll(filepath.Join(d.p.Files, e.Name())) // <token>.tmp may be a work dir
 	}
 }
 
@@ -631,7 +635,14 @@ func (d *Daemon) handleControl(req ctrlRequest) ctrlResponse {
 			OnionSession: d.session}
 		warning := ""
 		if !req.KeepMetadata {
-			sh.ServePath, sh.MetadataStripped, warning = d.prepareCopy(tok, req.Path)
+			res := d.prepareCopy(tok, req.Path)
+			if res.Copied {
+				sh.ServePath = copyPath(d.p, tok)
+			}
+			if res.Filename != "" {
+				sh.Filename = res.Filename
+			}
+			sh.MetadataStripped, warning = res.Stripped, res.Warning
 		}
 		err = d.store.Add(sh)
 		d.donePreparing(tok)

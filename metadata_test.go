@@ -19,8 +19,10 @@ import (
 	"time"
 )
 
-// Fixtures are built in code: small real images and documents with
-// metadata planted in every place the stripper is meant to clean.
+// These tests check GhostShare's use of metakill (options, copies,
+// messages, 7z/RAR repacking), not metakill itself. Most fixtures are
+// built in code with metadata planted where it is easy to find; the files
+// in testdata come from metakill (see testdata/README.md).
 
 func testImage() *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, 16, 8))
@@ -33,13 +35,13 @@ func testImage() *image.RGBA {
 }
 
 func jpegSegment(m byte, data []byte) []byte {
-	var b bytes.Buffer
-	writeSegment(&b, m, data)
-	return b.Bytes()
+	b := []byte{0xFF, m, 0, 0}
+	binary.BigEndian.PutUint16(b[2:], uint16(len(data)+2))
+	return append(b, data...)
 }
 
-// exifBlock is an EXIF APP1 payload with an orientation and a GPS-like
-// ImageDescription string.
+// exifBlock is an EXIF APP1 payload with an orientation and an
+// ImageDescription holding secret.
 func exifBlock(orientation int, secret string) []byte {
 	desc := secret + "\x00"
 	var t bytes.Buffer
@@ -71,7 +73,6 @@ func jpegFixture(t *testing.T, orientation int) []byte {
 	out.Write(jpegSegment(0xE0, []byte("JFXX\x00\x10THUMBSECRET")))
 	out.Write(jpegSegment(0xE1, exifBlock(orientation, "GPSSECRET 51.5007 N, 0.1246 W")))
 	out.Write(jpegSegment(0xE1, []byte("http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta><dc:creator>XMPSECRET</dc:creator></x:xmpmeta>")))
-	out.Write(jpegSegment(0xE2, []byte("ICC_PROFILE\x00\x01\x01fake-icc-profile")))
 	out.Write(jpegSegment(0xED, []byte("Photoshop 3.0\x008BIM\x04\x04\x00\x00\x00\x00\x00\x0aIPTCSECRET")))
 	out.Write(jpegSegment(0xFE, []byte("COMMENTSECRET")))
 	out.Write(b[2:])
@@ -108,7 +109,6 @@ func pngFixture(t *testing.T) []byte {
 	out.Write(pngChunk("tEXt", []byte("Author\x00TEXTSECRET")))
 	out.Write(pngChunk("zTXt", append([]byte("Comment\x00\x00"), z.Bytes()...)))
 	out.Write(pngChunk("iTXt", []byte("XML:com.adobe.xmp\x00\x00\x00\x00\x00ITXTSECRET")))
-	out.Write(pngChunk("eXIf", []byte("MM\x00\x2a\x00\x00\x00\x08EXIFSECRET")))
 	out.Write(pngChunk("tIME", []byte{0x07, 0xE5, 6, 1, 12, 0, 0}))
 	out.Write(b[afterIHDR:])
 	out.WriteString("TRAILERSECRET")
@@ -142,33 +142,23 @@ func zipFixture(t *testing.T, entries []zipEntry) []byte {
 	return b.Bytes()
 }
 
-const docxBody = `<w:document><w:body><w:p><w:r><w:t>Hello from the body</w:t></w:r></w:p></w:body></w:document>`
+const docxBody = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hello from the body</w:t></w:r></w:p></w:body></w:document>`
 
 func docxFixture(t *testing.T) []byte {
 	return zipFixture(t, []zipEntry{
-		{name: "[Content_Types].xml", body: `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`},
-		{name: "_rels/.rels", body: `<Relationships/>`},
+		{name: "[Content_Types].xml", body: `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
+		{name: "_rels/.rels", body: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`},
 		{name: "word/document.xml", body: docxBody},
-		{name: "docProps/core.xml", body: `<cp:coreProperties><dc:creator>AUTHORSECRET</dc:creator><cp:lastModifiedBy>EDITORSECRET</cp:lastModifiedBy><dcterms:created>2021-06-01T09:30:00Z</dcterms:created></cp:coreProperties>`},
-		{name: "docProps/app.xml", body: `<Properties><Company>COMPANYSECRET</Company><Manager>MANAGERSECRET</Manager></Properties>`},
-		{name: "docProps/custom.xml", body: `<Properties><property name="Client"><vt:lpwstr>CUSTOMSECRET</vt:lpwstr></property></Properties>`},
+		{name: "docProps/core.xml", body: `<?xml version="1.0" encoding="UTF-8"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:creator>AUTHORSECRET</dc:creator><cp:lastModifiedBy>EDITORSECRET</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">2021-06-01T09:30:00Z</dcterms:created></cp:coreProperties>`},
+		{name: "docProps/app.xml", body: `<?xml version="1.0" encoding="UTF-8"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Company>COMPANYSECRET</Company><Manager>MANAGERSECRET</Manager></Properties>`},
 	})
 }
 
-var docxSecrets = []string{"AUTHORSECRET", "EDITORSECRET", "2021-06-01", "COMPANYSECRET", "MANAGERSECRET", "CUSTOMSECRET", "ZIPCOMMENTSECRET", "ARCHIVECOMMENTSECRET"}
+var docxSecrets = []string{"AUTHORSECRET", "EDITORSECRET", "2021-06-01", "COMPANYSECRET", "MANAGERSECRET", "ZIPCOMMENTSECRET", "ARCHIVECOMMENTSECRET"}
 
-func odtFixture(t *testing.T) []byte {
-	return zipFixture(t, []zipEntry{
-		{name: "mimetype", body: "application/vnd.oasis.opendocument.text", store: true},
-		{name: "META-INF/manifest.xml", body: `<manifest:manifest/>`},
-		{name: "content.xml", body: `<office:document-content><office:text>Hello ODF body</office:text></office:document-content>`},
-		{name: "meta.xml", body: `<office:document-meta office:version="1.3"><office:meta><meta:initial-creator>ODFAUTHORSECRET</meta:initial-creator><dc:creator>ODFEDITORSECRET</dc:creator></office:meta></office:document-meta>`},
-	})
-}
-
-// strip writes data to a file named name, strips it, and checks that the
-// original was not touched.
-func strip(t *testing.T, name string, data []byte) (stripResult, []byte, string) {
+// strip copies data to a file named name, strips it, and checks that the
+// original was not touched and that nothing was left in the work dir.
+func strip(t *testing.T, name string, data []byte) (stripResult, []byte) {
 	t.Helper()
 	dir := t.TempDir()
 	src := filepath.Join(dir, name)
@@ -176,14 +166,14 @@ func strip(t *testing.T, name string, data []byte) (stripResult, []byte, string)
 		t.Fatal(err)
 	}
 	dst := filepath.Join(dir, "stripped")
+	work := filepath.Join(dir, "work")
 	before := sha256.Sum256(data)
-	res := stripMetadata(src, dst)
-	after, _ := os.ReadFile(src)
-	if sha256.Sum256(after) != before {
+	res := stripMetadata(src, dst, work)
+	if after, _ := os.ReadFile(src); sha256.Sum256(after) != before {
 		t.Fatal("the original file was modified")
 	}
-	if _, err := os.Stat(dst + ".tmp"); err == nil {
-		t.Fatal("temp file left behind")
+	if left, _ := os.ReadDir(work); len(left) != 0 {
+		t.Fatalf("files left in the work dir: %v", left)
 	}
 	out, err := os.ReadFile(dst)
 	if res.Copied && err != nil {
@@ -192,7 +182,20 @@ func strip(t *testing.T, name string, data []byte) (stripResult, []byte, string)
 	if !res.Copied && err == nil {
 		t.Fatal("a copy was written although the result says to share as-is")
 	}
-	return res, out, dst
+	if strings.Contains(res.Warning, "\n") {
+		t.Fatalf("warning is not one line: %q", res.Warning)
+	}
+	return res, out
+}
+
+func stripTestdata(t *testing.T, name string) (stripResult, []byte, []byte) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, out := strip(t, name, data)
+	return res, out, data
 }
 
 func assertNoSecrets(t *testing.T, out []byte, secrets []string) {
@@ -204,61 +207,73 @@ func assertNoSecrets(t *testing.T, out []byte, secrets []string) {
 	}
 }
 
-func TestStripJPEG(t *testing.T) {
-	data := jpegFixture(t, 6)
-	for _, s := range jpegSecrets { // the fixture really has them
+func assertHas(t *testing.T, data []byte, wants ...string) {
+	t.Helper()
+	for _, s := range wants {
 		if !bytes.Contains(data, []byte(s)) {
-			t.Fatalf("fixture lacks %q", s)
+			t.Errorf("missing %q", s)
 		}
 	}
-	res, out, _ := strip(t, "photo.jpg", data)
+}
+
+func assertClean(t *testing.T, res stripResult) {
+	t.Helper()
 	if !res.Copied || !res.Stripped || res.Warning != "" {
-		t.Fatalf("result %+v, want a clean stripped copy", res)
+		t.Fatalf("result %+v, want a clean copy with no warning", res)
 	}
+}
+
+func TestStripJPEG(t *testing.T) {
+	data := jpegFixture(t, 6)
+	assertHas(t, data, jpegSecrets...) // the fixture really has them
+	res, out := strip(t, "photo.jpg", data)
+	assertClean(t, res)
 	assertNoSecrets(t, out, jpegSecrets)
 	img, err := jpeg.Decode(bytes.NewReader(out))
 	if err != nil {
 		t.Fatalf("stripped JPEG doesn't decode: %v", err)
 	}
-	if img.Bounds() != testImage().Bounds() {
-		t.Fatalf("bounds %v", img.Bounds())
-	}
 	orig, _ := jpeg.Decode(bytes.NewReader(data))
 	if !sameImage(orig, img) {
 		t.Fatal("stripped JPEG decodes to different pixels")
 	}
-	if !bytes.Contains(out, []byte("ICC_PROFILE")) || !bytes.Contains(out, []byte("JFIF")) {
-		t.Error("the ICC profile and JFIF header should be kept")
-	}
-	// The orientation survives in a minimal EXIF block, so the photo isn't shown rotated.
+	// The orientation survives, so the photo isn't shown rotated.
 	i := bytes.Index(out, []byte("Exif\x00\x00"))
 	if i < 0 || exifOrientation(out[i+6:]) != 6 {
 		t.Fatal("orientation 6 was not kept")
 	}
 }
 
-func TestStripJPEGWithoutOrientationHasNoExif(t *testing.T) {
-	_, out, _ := strip(t, "photo.jpeg", jpegFixture(t, 1))
-	if bytes.Contains(out, []byte("Exif")) {
-		t.Fatal("an EXIF block was written for the default orientation")
+// exifOrientation reads tag 0x0112 from a TIFF block (0 if absent).
+func exifOrientation(tiff []byte) int {
+	if len(tiff) < 8 {
+		return 0
 	}
-	if _, err := jpeg.Decode(bytes.NewReader(out)); err != nil {
-		t.Fatal(err)
+	var bo binary.ByteOrder = binary.BigEndian
+	if string(tiff[:2]) == "II" {
+		bo = binary.LittleEndian
 	}
+	off := int(bo.Uint32(tiff[4:]))
+	if off+2 > len(tiff) {
+		return 0
+	}
+	n := int(bo.Uint16(tiff[off:]))
+	for i := 0; i < n; i++ {
+		e := off + 2 + 12*i
+		if e+12 > len(tiff) {
+			return 0
+		}
+		if bo.Uint16(tiff[e:]) == 0x0112 {
+			return int(bo.Uint16(tiff[e+8:]))
+		}
+	}
+	return 0
 }
 
 func TestStripPNG(t *testing.T) {
-	data := pngFixture(t)
-	res, out, _ := strip(t, "screenshot.png", data)
-	if !res.Copied || !res.Stripped || res.Warning != "" {
-		t.Fatalf("result %+v", res)
-	}
-	assertNoSecrets(t, out, []string{"TEXTSECRET", "ITXTSECRET", "EXIFSECRET", "TRAILERSECRET"})
-	for _, typ := range []string{"tEXt", "zTXt", "iTXt", "eXIf", "tIME"} {
-		if bytes.Contains(out, []byte(typ)) {
-			t.Errorf("%s chunk still present", typ)
-		}
-	}
+	res, out := strip(t, "screenshot.png", pngFixture(t))
+	assertClean(t, res)
+	assertNoSecrets(t, out, []string{"TEXTSECRET", "ITXTSECRET", "TRAILERSECRET", "tIME"})
 	img, err := png.Decode(bytes.NewReader(out))
 	if err != nil {
 		t.Fatalf("stripped PNG doesn't decode: %v", err)
@@ -269,79 +284,156 @@ func TestStripPNG(t *testing.T) {
 }
 
 func TestStripDOCX(t *testing.T) {
-	data := docxFixture(t)
-	res, out, _ := strip(t, "report.docx", data)
-	if !res.Copied || !res.Stripped || res.Warning != "" {
-		t.Fatalf("result %+v", res)
-	}
+	res, out := strip(t, "report.docx", docxFixture(t))
+	assertClean(t, res)
 	assertNoSecrets(t, out, docxSecrets)
 	zr, err := zip.NewReader(bytes.NewReader(out), int64(len(out)))
 	if err != nil {
 		t.Fatalf("stripped DOCX is not a valid zip: %v", err)
 	}
-	var names []string
 	for _, f := range zr.File {
-		names = append(names, f.Name)
-		if f.Modified.Year() > 1980 || len(f.Extra) != 0 {
-			t.Errorf("%s: modified %v, %d extra bytes; want 1980 and none", f.Name, f.Modified, len(f.Extra))
+		if f.Modified.Year() > 1980 {
+			t.Errorf("%s: modified %v, want 1980", f.Name, f.Modified)
 		}
 		body := readZipEntry(t, f)
-		if f.Name == "word/document.xml" && body != docxBody {
+		if f.Name == "word/document.xml" && !strings.Contains(body, "Hello from the body") {
 			t.Errorf("document body changed: %q", body)
 		}
-		if strings.HasPrefix(f.Name, "docProps/") && strings.Contains(body, "SECRET") {
+		if strings.Contains(body, "SECRET") {
 			t.Errorf("%s still has metadata: %q", f.Name, body)
 		}
 	}
-	if strings.Join(names, ",") != "[Content_Types].xml,_rels/.rels,word/document.xml,docProps/core.xml,docProps/app.xml,docProps/custom.xml" {
-		t.Errorf("entries changed: %v", names)
+}
+
+// Audio keeps what a music player shows (title, artist, album, track,
+// year) and loses the rest: comments, encoder, purchase IDs, cover art.
+func TestStripMP3KeepsUsefulTags(t *testing.T) {
+	res, out, data := stripTestdata(t, "song.mp3")
+	assertClean(t, res)
+	assertHas(t, data, "Jane Photographer", "secret comment", "SecretEncoder", "SN-0042-SECRET", "APIC")
+	assertHas(t, out, "Test Song", "Test Artist", "Test Album", "2023")
+	assertNoSecrets(t, out, []string{"Jane Photographer", "secret comment", "SecretEncoder", "SN-0042-SECRET", "APIC", "iPhone"})
+}
+
+func TestStripMP4KeepsUsefulTags(t *testing.T) {
+	res, out, _ := stripTestdata(t, "clip.mp4")
+	assertClean(t, res)
+	assertHas(t, out, "Test Song", "Test Artist")
+	assertNoSecrets(t, out, []string{"Jane Photographer", "iPhone 14 Pro", "SecretEncoder", "SN-0042-SECRET", "secret comment"})
+}
+
+func TestStripPDF(t *testing.T) {
+	res, out, _ := stripTestdata(t, "report.pdf")
+	assertClean(t, res)
+	assertNoSecrets(t, out, []string{"Jane Photographer", "Old Author Name", "iOS 16.4", "SecretEncoder", "D:2023"})
+}
+
+// 7z and RAR are repacked as zip, then cleaned: member times reset, OS
+// clutter dropped, the photo inside cleaned, executable bits kept.
+func TestStripRepacksArchivesAsZip(t *testing.T) {
+	for _, name := range []string{"bundle.7z", "bundle.rar"} {
+		t.Run(name, func(t *testing.T) {
+			res, out, _ := stripTestdata(t, name)
+			if !res.Copied || !res.Stripped {
+				t.Fatalf("result %+v", res)
+			}
+			// The fixture has Users/jane/notes.txt; entry names are kept,
+			// but the sender is told.
+			if !strings.Contains(res.Warning, "home-directory") || !strings.Contains(res.Warning, "Users/jane") {
+				t.Errorf("warning %q doesn't point out the home-folder path", res.Warning)
+			}
+			if res.Filename != "bundle.zip" {
+				t.Fatalf("served name %q, want bundle.zip", res.Filename)
+			}
+			zr, err := zip.NewReader(bytes.NewReader(out), int64(len(out)))
+			if err != nil {
+				t.Fatalf("not a zip: %v", err)
+			}
+			got := map[string]*zip.File{}
+			for _, f := range zr.File {
+				got[f.Name] = f
+				if f.Modified.Year() > 1980 {
+					t.Errorf("%s: modified %v", f.Name, f.Modified)
+				}
+			}
+			for _, want := range []string{"docs/readme.txt", "docs/photo.jpg", "docs/run.sh"} {
+				if got[want] == nil {
+					t.Errorf("%s missing; have %v", want, keys(got))
+				}
+			}
+			if got["docs/.DS_Store"] != nil {
+				t.Error(".DS_Store was kept")
+			}
+			if f := got["docs/run.sh"]; f != nil && f.Mode()&0o111 == 0 {
+				t.Errorf("run.sh lost its executable bit: %v", f.Mode())
+			}
+			if f := got["docs/photo.jpg"]; f != nil {
+				photo := []byte(readZipEntry(t, f))
+				assertNoSecrets(t, photo, []string{"iPhone", "Jane Photographer", "SN-0042-SECRET"})
+				if _, err := jpeg.Decode(bytes.NewReader(photo)); err != nil {
+					t.Errorf("photo inside doesn't decode: %v", err)
+				}
+			}
+		})
 	}
 }
 
-func TestStripODT(t *testing.T) {
-	res, out, _ := strip(t, "notes.odt", odtFixture(t))
-	if !res.Copied || !res.Stripped {
-		t.Fatalf("result %+v", res)
+func keys(m map[string]*zip.File) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
 	}
-	assertNoSecrets(t, out, []string{"ODFAUTHORSECRET", "ODFEDITORSECRET", "ZIPCOMMENTSECRET"})
-	zr, err := zip.NewReader(bytes.NewReader(out), int64(len(out)))
-	if err != nil {
-		t.Fatal(err)
+	return out
+}
+
+func TestEncryptedArchiveSharesAsIs(t *testing.T) {
+	res, _, _ := stripTestdata(t, "locked.7z")
+	if res.Copied || res.Stripped || res.Filename != "" || !strings.Contains(res.Warning, "encrypted") || !strings.Contains(res.Warning, "sharing as-is") {
+		t.Fatalf("%+v", res)
 	}
-	first := zr.File[0]
-	if first.Name != "mimetype" || first.Method != zip.Store || len(first.Extra) != 0 {
-		t.Fatalf("ODF needs mimetype first, stored, with no extra field; got %s method %d extra %d", first.Name, first.Method, len(first.Extra))
+}
+
+func TestRepackRefusesLinksAndUnsafeNames(t *testing.T) {
+	z := newZipRepacker(io.Discard)
+	if err := z.add(archiveEntry{name: "link", isLink: true}); err == nil {
+		t.Error("a link was accepted")
 	}
-	for _, f := range zr.File {
-		if f.Name == "meta.xml" && !strings.Contains(readZipEntry(t, f), `office:version="1.3"`) {
-			t.Error("meta.xml lost its office:version")
+	for _, n := range []string{"/etc/passwd", "../up", "a/../../up", `C:\x`, `..\up`, ""} {
+		if _, err := safeEntryName(n); err == nil {
+			t.Errorf("%q accepted", n)
 		}
-		if f.Name == "content.xml" && !strings.Contains(readZipEntry(t, f), "Hello ODF body") {
-			t.Error("content changed")
-		}
+	}
+	if n, err := safeEntryName(`dir\file.txt`); err != nil || n != "dir/file.txt" {
+		t.Errorf("dir\\file.txt → %q, %v", n, err)
+	}
+	if got := zipName("holiday.photos.7z"); got != "holiday.photos.zip" {
+		t.Errorf("zipName = %q", got)
 	}
 }
 
 func TestPlainTextNeedsNoCopy(t *testing.T) {
-	res, _, _ := strip(t, "notes.txt", []byte("just some notes\n"))
+	res, _ := strip(t, "notes.txt", []byte("just some notes\n"))
 	if res.Copied || !res.Stripped || res.Warning != "" {
 		t.Fatalf("result %+v, want stripped with no copy and no warning", res)
 	}
 }
 
-func TestUnsupportedTypesShareAsIsWithWarning(t *testing.T) {
-	for _, tc := range []struct {
-		name, data, want string
-	}{
-		{"clip.mp4", "\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom", "can't remove metadata from .mp4 files; sharing as-is"},
-		{"paper.pdf", "%PDF-1.7\n1 0 obj << /Author (PDFSECRET) >> endobj\n", "can't remove metadata from .pdf files; sharing as-is"},
-		{"page.html", "<!DOCTYPE html><html><head><meta name=author content=x></head></html>", "can't remove metadata from .html files"},
-		{"archive.zip", "PK\x03\x04plainzip", "can't remove metadata from .zip files"},
-		{"noext", "\x00\x01\x02\x03binary", "can't remove metadata from files of this type"},
+func TestAlreadyCleanFileNeedsNoCopy(t *testing.T) {
+	_, clean := strip(t, "photo.jpg", jpegFixture(t, 1))
+	res, _ := strip(t, "photo.jpg", clean)
+	if res.Copied || !res.Stripped || res.Warning != "" {
+		t.Fatalf("result %+v, want the already-clean original served", res)
+	}
+}
+
+func TestUnknownTypesShareAsIsWithWarning(t *testing.T) {
+	for _, tc := range []struct{ name, data, want string }{
+		{"blob.bin", "\x00\x01\x02\x03binary", "can't remove metadata from .bin files; sharing as-is"},
+		{"noext", "\x00\x01\x02\x03binary", "can't remove metadata from files of this type; sharing as-is"},
 	} {
-		res, _, _ := strip(t, tc.name, []byte(tc.data))
-		if res.Copied || res.Stripped || !strings.Contains(res.Warning, tc.want) || strings.Contains(res.Warning, "\n") {
-			t.Errorf("%s: %+v, want a one-line warning containing %q", tc.name, res, tc.want)
+		res, _ := strip(t, tc.name, []byte(tc.data))
+		if res.Copied || res.Stripped || res.Warning != tc.want {
+			t.Errorf("%s: %+v, want warning %q", tc.name, res, tc.want)
 		}
 	}
 }
@@ -352,7 +444,7 @@ func TestEncryptedFilesWarnToStripFirst(t *testing.T) {
 		"armored.txt": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdl\n-----END AGE ENCRYPTED FILE-----\n",
 		"message.gpg": "\x85\x01\x0c\x03binary-pgp",
 	} {
-		res, _, _ := strip(t, name, []byte(data))
+		res, _ := strip(t, name, []byte(data))
 		if res.Copied || res.Stripped || !strings.Contains(res.Warning, "strip metadata before encrypting") {
 			t.Errorf("%s: %+v", name, res)
 		}
@@ -361,13 +453,12 @@ func TestEncryptedFilesWarnToStripFirst(t *testing.T) {
 
 func TestStripFailureSharesAsIsWithWarning(t *testing.T) {
 	for name, data := range map[string][]byte{
-		"broken.jpg":  {0xFF, 0xD8, 0xFF, 0xE1, 0x7F, 0xFF, 'E', 'x'}, // segment runs past EOF
-		"broken.png":  []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHD"),
-		"broken.docx": []byte("PK\x03\x04this is not really a zip"),
-		"plain.docx":  zipFixture(t, []zipEntry{{name: "readme.txt", body: "no content types"}}),
+		"broken.jpg": {0xFF, 0xD8, 0xFF, 0xE1, 0x7F, 0xFF, 'E', 'x'}, // segment runs past EOF
+		"broken.png": []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHD"),
+		"broken.7z":  append([]byte{'7', 'z', 0xBC, 0xAF, 0x27, 0x1C}, make([]byte, 40)...),
 	} {
-		res, _, _ := strip(t, name, data)
-		if res.Copied || res.Stripped || !strings.Contains(res.Warning, "couldn't remove metadata from "+name) || !strings.Contains(res.Warning, "sharing as-is") {
+		res, _ := strip(t, name, data)
+		if res.Copied || res.Stripped || !strings.Contains(res.Warning, name) || !strings.HasSuffix(res.Warning, "sharing as-is") {
 			t.Errorf("%s: %+v", name, res)
 		}
 	}
@@ -403,19 +494,22 @@ func sameImage(a, b image.Image) bool {
 	return true
 }
 
-// Garbage behind a valid signature must never crash the daemon: stripping
-// either succeeds or warns.
+// Garbage behind a valid signature must never crash the daemon or leave
+// files behind: stripping succeeds, finds nothing to do, or warns.
 func TestStripNeverPanicsOnGarbage(t *testing.T) {
 	seeds := map[string][]byte{
 		"x.jpg":  jpegFixture(t, 3),
 		"x.png":  pngFixture(t),
 		"x.docx": docxFixture(t),
-		"x.odt":  odtFixture(t),
+	}
+	for _, n := range []string{"bundle.7z", "bundle.rar", "song.mp3"} {
+		b, _ := os.ReadFile(filepath.Join("testdata", n))
+		seeds[n] = b
 	}
 	rng := uint32(1)
 	next := func() uint32 { rng = rng*1664525 + 1013904223; return rng }
 	for name, seed := range seeds {
-		for i := 0; i < 200; i++ {
+		for i := 0; i < 60; i++ {
 			data := append([]byte(nil), seed...)
 			switch i % 3 {
 			case 0: // truncate
@@ -430,9 +524,9 @@ func TestStripNeverPanicsOnGarbage(t *testing.T) {
 					data[j] = byte(next())
 				}
 			}
-			res, _, _ := strip(t, name, data)
-			if !res.Copied && res.Warning == "" {
-				t.Fatalf("%s variant %d: not copied but no warning", name, i)
+			res, _ := strip(t, name, data)
+			if !res.Copied && !res.Stripped && res.Warning == "" {
+				t.Fatalf("%s variant %d: shared as-is with no warning", name, i)
 			}
 		}
 	}

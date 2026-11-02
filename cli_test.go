@@ -9,6 +9,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -60,6 +61,10 @@ func newCLIEnv(t *testing.T) *cliEnv {
 	ft := newFakeTor(t, "AUTH METHODS=NULL")
 	e := &cliEnv{home: home, ft: ft, controlAddr: ft.controlAddr(), path: t.TempDir()}
 	t.Cleanup(func() {
+		if t.Failed() {
+			b, _ := os.ReadFile(filepath.Join(home, "ghostshare.log"))
+			t.Logf("daemon log:\n%s", b)
+		}
 		e.run(t, "stop")
 		os.RemoveAll(home)
 	})
@@ -720,12 +725,12 @@ func TestCLIKeepMetadataServesOriginal(t *testing.T) {
 
 func TestCLIUnsupportedTypeSharesWithWarning(t *testing.T) {
 	e := newCLIEnv(t)
-	data := []byte("\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom-video-bytes")
-	v, errOut := e.shareJSON(t, writeFixture(t, "clip.mp4", data))
+	data := []byte("\x00\x01\x02\x03 some binary format")
+	v, errOut := e.shareJSON(t, writeFixture(t, "firmware.bin", data))
 	if v.MetadataStripped {
 		t.Fatal("metadata_stripped = true for an unsupported type")
 	}
-	if !strings.Contains(errOut, "warning: can't remove metadata from .mp4 files; sharing as-is\n") {
+	if !strings.Contains(errOut, "warning: can't remove metadata from .bin files; sharing as-is\n") {
 		t.Fatalf("stderr is missing the one-line warning:\n%s", errOut)
 	}
 	if _, body := e.fetch(t, v.URL); !bytes.Equal(body, data) {
@@ -827,4 +832,30 @@ func TestCLIDeletingOriginalEndsStrippedShare(t *testing.T) {
 	os.Remove(photo)
 	e.waitGone(t, v.URL)
 	e.waitNoCopy(t, v.Token)
+}
+
+func TestCLISharesSevenZipAsCleanZip(t *testing.T) {
+	e := newCLIEnv(t)
+	src, err := filepath.Abs(filepath.Join("testdata", "bundle.7z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, errOut := e.shareJSON(t, src)
+	if !v.MetadataStripped || !strings.HasSuffix(v.URL, "/bundle.zip") {
+		t.Fatalf("url %s, metadata_stripped %v", v.URL, v.MetadataStripped)
+	}
+	if !strings.Contains(errOut, "bundle.7z was repacked as bundle.zip so its metadata could be removed") {
+		t.Errorf("stderr is missing the repack note:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "warning: bundle.7z: member names look like") {
+		t.Errorf("stderr doesn't warn about the home-folder entry name:\n%s", errOut)
+	}
+	resp, body := e.fetch(t, v.URL)
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "filename=bundle.zip") && !strings.Contains(cd, `filename="bundle.zip"`) {
+		t.Errorf("Content-Disposition = %q", cd)
+	}
+	if _, err := zip.NewReader(bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatalf("download is not a zip: %v", err)
+	}
+	assertNoSecrets(t, body, []string{"iPhone", "Jane Photographer"})
 }

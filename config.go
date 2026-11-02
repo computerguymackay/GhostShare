@@ -36,11 +36,11 @@ const configTemplate = `# ghostshare configuration
 default_expiry        = "24h"
 default_max_downloads = 1
 
-# Remove EXIF, GPS, author names and similar from a copy of each file
-# before sharing it (the original is never changed). Supported: JPEG, PNG,
-# Office (.docx, .xlsx, .pptx, ...) and OpenDocument files; other types are
-# shared as-is with a warning. -k / --keep-metadata turns this off for one
-# share.
+# Remove GPS, timestamps, device details, author names and similar from a
+# copy of each file before sharing it (the original is never changed).
+# Media keeps its title, artist, album, track and year. 7z and RAR are
+# repacked as zip. Files that can't be cleaned are shared as-is with a
+# warning. -k / --keep-metadata turns this off for one share.
 strip_metadata = true
 `
 

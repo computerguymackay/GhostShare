@@ -67,7 +67,7 @@ go test -race ./...
 GHOSTSHARE_TOR_TEST=1 go test -tags=tortest ./...
 # Shorten daemon timers for local testing
 GHOSTSHARE_GRACE=2s GHOSTSHARE_TICK=1s go test ./... ``` Build 
-expectations: seconds, not minutes. Binary ~17 MB (~11.5 MB stripped with -ldflags='-s -w'); pure-Go SQLite and net/http account for most of it, and QuickShare is also ~17 MB. If a change makes 
+expectations: seconds, not minutes. Binary ~27 MB (~18.5 MB stripped with -ldflags='-s -w'); pure-Go SQLite, net/http and metakill (with pdfcpu and the archive and media parsers it uses) account for most of it. QuickShare is ~17 MB. (Was ~17 MB before metakill, 2026-11-02.) If a change makes 
 the build slow or requires CGO, that's a regression — stop and fix 
 it. --- Architecture ``` GhostShare/ ├── main.go # CLI entry, flag 
 parsing, dispatch ├── config.go # ~/.ghostshare/config.toml load/save 
@@ -75,8 +75,8 @@ parsing, dispatch ├── config.go # ~/.ghostshare/config.toml load/save
 ├── tor.go # Tor detection, spawn, onion service (bine) ├── server.go 
 # HTTP file server, token routing, download counting
 ├── store.go # SQLite state (shares survive restarts) ├── token.go # 
-144-bit token generation ├── metadata.go # metadata stripping (JPEG, 
-PNG, Office, ODF; stdlib only) ├── qr.go # QR code rendering (terminal + 
+144-bit token generation ├── metadata.go # metadata stripping via metakill (options, copies, 
+warnings) ├── archive.go # repack 7z/RAR as zip so metakill can clean them ├── qr.go # QR code rendering (terminal + 
 PNG) ├── control.go # CLI ↔ daemon socket protocol (line-delimited 
 JSON) ├── paths.go # ~/.ghostshare/ path resolution ├── 
 platform_unix.go # Unix domain socket for control channel └── 
@@ -89,7 +89,11 @@ onions only modernc.org/sqlite SQLite Pure Go, no CGO.
 Non-negotiable. Matches QuickShare's "pure Go SQLite, no cgo" stance. 
 github.com/skip2/go-qrcode QR codes Terminal + PNG 
 github.com/BurntSushi/toml Config parsing Matches QuickShare's config 
-format Forbidden: go-libtor, mattn/go-sqlite3, anything requiring 
+format github.com/computerguymackay/metakill Metadata stripping Same 
+author, MIT, pure Go. Pinned (v0.4.0; API may change before v1.0). Not 
+modified from here: GhostShare adapts to it. github.com/bodgit/sevenzip, 
+github.com/nwaples/rardecode/v2 Reading 7z/RAR for zip repacking Already 
+pulled in by metakill; same versions. Forbidden: go-libtor, mattn/go-sqlite3, anything requiring 
 CGO. If Claude Code proposes adding one of these, stop and ask. --- 
 Tor Integration Rules 1. Detect, then spawn. On startup, in order:
    1. Try to connect to a running Tor's control port (127.0.0.1:9051, 
@@ -114,7 +118,10 @@ print a link that doesn't yet resolve. 4.
 Teardown must be bulletproof. defer onion.Close() and a 
 SIGINT/SIGTERM handler. If we spawned Tor, kill it. If we attached to 
 a running Tor, leave it alone. No zombie processes, no leaked onion 
-descriptors. 5. --external-tor is the default path, not an 
+descriptors. Serialize control-port commands: bine deadlocks when two 
+goroutines send commands on one control connection at once, so every 
+command goes through torSession.control (found 2026-11-02 with two 
+shares publishing together). 5. --external-tor is the default path, not an 
 afterthought. The flag exists to make the intent explicit and to help 
 with testing, but the code path it exercises is the primary one. 6. 
 One onion per share. Every share gets its own fresh v3 onion address 
@@ -141,13 +148,22 @@ ghostshare --help. Recipients must use Tor Browser (or curl
 ~/.ghostshare/files/<token> (path derived from the token, never from a 
 stored path, so cleanup can't touch user files); delete it when the 
 share ends. Never modify the user's original file. Never block a share 
-over metadata: unsupported types (including PDF, which can't be 
-stripped reliably without a full parser) and failures share the 
-original with a one-line stderr warning. -k/--keep-metadata and 
-strip_metadata = false opt out, with a warning. Pure Go, stdlib only. 
+over metadata: unknown types and failures share the original with a 
+one-line stderr warning. -k/--keep-metadata and strip_metadata = false 
+opt out, with a warning. Stripping is metakill's job, with 
+Options{KeepTags: true, KeepICC: true}: media keeps title, artist, 
+album, track and year (useful for sharing media); cover art and 
+thumbnails go (metakill can't keep one without the other, and a photo 
+thumbnail can show the uncropped picture). 7z and RAR are repacked as 
+zip in pure Go (archive.go; the served name becomes .zip), because 
+metakill needs an external 7-Zip/rar to write them and GhostShare runs 
+nothing but Tor. Encrypted, multi-volume and link-holding archives are 
+shared as-is. metakill's own warnings (e.g. home-folder paths inside 
+archives) are shown. All work files stay in ~/.ghostshare/files/<token>.tmp 
+(CleanFile stages next to its input), never in the system temp dir. 
 · Never reveal file timestamps: no Last-Modified header (ServeContent 
-gets time.Time{}), and zip entry times in stripped Office/ODF copies 
-are reset. --- 
+gets time.Time{}), and zip entry times in stripped copies are reset 
+(metakill). --- 
 Download-Counting Semantics (match QuickShare exactly) · A completed 
 full GET counts once, even if the same person downloads twice. · A 
 broken transfer doesn't count. If they resume and finish, that counts 
@@ -292,4 +308,4 @@ spirit even if not in git. · OnionShare — onion-service lifecycle
 patterns (Python; instructive, not a competitor) · garlicshare — Go + 
 bine reference · bine examples — canonical bine usage · Tor Browser — 
 for manual verification of onion links ---
-Last updated: 2026-10-31. Update this file when design decisions change — future Claude Code sessions depend on it.
+Last updated: 2026-11-02. Update this file when design decisions change — future Claude Code sessions depend on it.

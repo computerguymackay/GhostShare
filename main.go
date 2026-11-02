@@ -264,6 +264,9 @@ func cmdShare(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	link := resp.URL
 
 	fmt.Fprintln(stderr, securityWarning)
+	if orig := filepath.Base(path); sh.Filename != orig {
+		fmt.Fprintf(stderr, "%s was repacked as %s so its metadata could be removed\n", orig, sh.Filename)
+	}
 	switch {
 	case !strip:
 		warnf(stderr, "metadata is not being removed (EXIF, GPS, author names and the like are shared as-is)")

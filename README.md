@@ -11,7 +11,7 @@ the recipient must open this link in Tor Browser
 http://abc...xyz.onion/q3V9x.../holiday.jpg
 ```
 
-The recipient opens the link in Tor Browser, the file downloads, and the link dies. The photo they get has no EXIF, GPS position or camera details: GhostShare strips metadata from a copy of the file by default and never changes your original.
+The recipient opens the link in Tor Browser, the file downloads, and the link dies. The photo they get has no GPS position, camera details or timestamps: GhostShare strips personal metadata from a copy of the file by default (keeping useful tags like a song's title and artist) and never changes your original.
 
 GhostShare is a small tool for people who already use Tor and want to share a file through it with one command. It is not a general-purpose anonymity suite.
 
@@ -84,19 +84,20 @@ link=$(ghostshare build.tar.gz --json | jq -r .url)
 
 ### Metadata
 
-By default, GhostShare removes metadata before sharing: it writes a stripped copy of the file into its state directory (`~/.ghostshare/files/`) and serves that, under the original filename. Your original file is only read, never changed. The copy is deleted when the share ends (download limit, expiry, `revoke`, or the original is deleted), and kept, like the rest of the share, across `ghostshare stop` and restarts.
+By default, GhostShare removes personal metadata before sharing, using [metakill](https://github.com/computerguymackay/metakill). It writes a cleaned copy of the file into its state directory (`~/.ghostshare/files/`) and serves that, under the original filename. Your original file is only read, never changed. The copy is deleted when the share ends (download limit, expiry, `revoke`, or the original is deleted), and kept, like the rest of the share, across `ghostshare stop` and restarts. Files with nothing to remove (plain text, an already-clean photo) are served directly, without a copy.
 
-| Format | What is removed |
-| --- | --- |
-| JPEG | EXIF (including GPS and camera details), XMP, IPTC, comments, embedded thumbnails, and anything after the end of the image. The ICC color profile is kept, and so is the EXIF orientation (on its own), so photos aren't shown rotated. |
-| PNG | `tEXt`, `zTXt`, `iTXt`, `eXIf` and `tIME` chunks, and anything after the end of the image. |
-| Office: `.docx`, `.xlsx`, `.pptx` and the other Office Open XML types | Document properties (`docProps/core.xml`, `app.xml`, `custom.xml`: author, last editor, company, manager, dates, custom fields) are emptied. Zip entry timestamps, extra fields and comments are cleared. |
-| OpenDocument: `.odt`, `.ods`, `.odp`, `.odg` and templates | `meta.xml` (author, dates, editing statistics) is emptied. Zip entry timestamps, extra fields and comments are cleared. |
-| Plain text | Nothing to remove; shared as-is. |
+The aim is to remove what identifies you while keeping what makes the file useful to the recipient:
 
-Everything else is shared as-is with a one-line warning on stderr, for example `warning: can't remove metadata from .mp4 files; sharing as-is`. That includes PDF: its metadata can't be removed reliably without a full PDF parser, because PDFs can hold several old copies of their metadata (incremental saves, compressed object streams). It also includes video, audio, HEIC, SVG, HTML and plain `.zip` files. Encrypted files (`.age`, `.gpg`) are shared as-is too; the warning suggests stripping before encrypting next time. A share is never refused because of metadata: if stripping fails, the original is shared with a warning.
+- **Always removed:** GPS and location, timestamps, camera and device details (make, model, serial numbers), owner and author names, software and encoder strings, comments, embedded thumbnails and cover art, and anything hidden after the end of the data.
+- **Kept:** the content itself; in music and video, the title, artist, album, track number and year (as just the year); document titles; photo orientation, so pictures aren't shown rotated; and colour profiles, so they look right.
 
-Limits: in Office and OpenDocument files, only the document properties are cleaned. Author names on comments and tracked changes, images embedded in the document (with their own EXIF), document thumbnails, and settings such as printer names are not removed. The file name is never changed. The stripped copy is made when you share, so later edits to the original are not picked up, and it takes as much disk space as the file.
+Supported formats include JPEG, PNG, WebP, HEIC, TIFF, GIF, SVG, PDF, Office (`.docx`, `.xlsx`, `.pptx`), OpenDocument, EPUB, MP3, FLAC, Ogg/Opus, WAV, MP4/MOV, MKV and AVI. Zip and tar archives are cleaned inside, file by file, including photos inside documents and archives inside archives. See metakill's README for the full list.
+
+**7z and RAR archives are repacked as zip**: metakill can only rewrite them with 7-Zip or rar installed, and GhostShare doesn't run other programs, so it converts them to zip first and cleans that. The link then ends in `.zip` instead of `.7z`/`.rar`, and stderr says so. The zip may be larger than a solid 7z. Encrypted and multi-volume archives, and archives containing links, can't be repacked and are shared as-is with a warning.
+
+Files that can't be cleaned are shared as-is with a one-line warning on stderr, for example `warning: can't remove metadata from .bin files; sharing as-is`. That covers unknown types, signed packages (APK, signed JAR) that would break if rewritten, encrypted PDFs, and encrypted files (`.age`, `.gpg`; the warning suggests stripping before encrypting next time). A share is never refused because of metadata: if cleaning fails, the original is shared with a warning. When metakill notices something it deliberately leaves alone, such as an archive entry under a home folder (`Users/jane/notes.txt`; entry names are never changed), that is shown as a warning too.
+
+Limits: settings embedded in a video's encoded stream (such as x264's) are not touched. Genre, album artist, disc number and lyrics are removed along with other tags. The cleaned copy is made when you share, so later edits to the original are not picked up, and it takes as much disk space as the file (twice that while it is being made).
 
 Turn stripping off for one share with `-k` / `--keep-metadata` (a warning says metadata is not being removed), or for all shares with `strip_metadata = false` in the config. `--json` output includes `"metadata_stripped": true|false`, and `ghostshare list` has a METADATA column.
 
