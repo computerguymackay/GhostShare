@@ -152,9 +152,12 @@ over metadata: unknown types and failures share the original with a
 one-line stderr warning. -k/--keep-metadata and strip_metadata = false 
 opt out, with a warning. Stripping is metakill's job, with 
 Options{KeepTags: true, KeepICC: true}: media keeps title, artist, 
-album, track and year (useful for sharing media); cover art and 
-thumbnails go (metakill can't keep one without the other, and a photo 
-thumbnail can show the uncropped picture). 7z and RAR are repacked as 
+album, track and year (useful for sharing media). metakill keeps cover 
+art and thumbnails together or not at all, and a photo thumbnail can 
+show the uncropped picture, so KeepThumbnails is set only when the 
+shared file itself is audio or video (optionsFor in metadata.go); 
+archives and everything else lose both. Those five tags are enough; 
+don't widen them, and don't modify metakill. 7z and RAR are repacked as 
 zip in pure Go (archive.go; the served name becomes .zip), because 
 metakill needs an external 7-Zip/rar to write them and GhostShare runs 
 nothing but Tor. Encrypted, multi-volume and link-holding archives are 

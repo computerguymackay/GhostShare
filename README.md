@@ -88,8 +88,10 @@ By default, GhostShare removes personal metadata before sharing, using [metakill
 
 The aim is to remove what identifies you while keeping what makes the file useful to the recipient:
 
-- **Always removed:** GPS and location, timestamps, camera and device details (make, model, serial numbers), owner and author names, software and encoder strings, comments, embedded thumbnails and cover art, and anything hidden after the end of the data.
-- **Kept:** the content itself; in music and video, the title, artist, album, track number and year (as just the year); document titles; photo orientation, so pictures aren't shown rotated; and colour profiles, so they look right.
+- **Always removed:** GPS and location, timestamps, camera and device details (make, model, serial numbers), owner and author names, software and encoder strings, comments, embedded thumbnails, and anything hidden after the end of the data.
+- **Kept:** the content itself; in music and video, the title, artist, album, track number, year (as just the year) and cover art (with its own EXIF removed); document titles; photo orientation, so pictures aren't shown rotated; and colour profiles, so they look right.
+
+Cover art is kept only when the file you share is audio or video. Inside an archive (a zip of songs, say) it is removed, because the same setting would also keep photos' thumbnails, which can show a picture before it was cropped.
 
 Supported formats include JPEG, PNG, WebP, HEIC, TIFF, GIF, SVG, PDF, Office (`.docx`, `.xlsx`, `.pptx`), OpenDocument, EPUB, MP3, FLAC, Ogg/Opus, WAV, MP4/MOV, MKV and AVI. Zip and tar archives are cleaned inside, file by file, including photos inside documents and archives inside archives. See metakill's README for the full list.
 

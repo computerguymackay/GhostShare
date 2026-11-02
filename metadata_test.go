@@ -306,19 +306,79 @@ func TestStripDOCX(t *testing.T) {
 }
 
 // Audio keeps what a music player shows (title, artist, album, track,
-// year) and loses the rest: comments, encoder, purchase IDs, cover art.
+// year, cover art) and loses the rest: comments, encoder, purchase IDs,
+// and the EXIF inside the cover art.
 func TestStripMP3KeepsUsefulTags(t *testing.T) {
 	res, out, data := stripTestdata(t, "song.mp3")
 	assertClean(t, res)
-	assertHas(t, data, "Jane Photographer", "secret comment", "SecretEncoder", "SN-0042-SECRET", "APIC")
-	assertHas(t, out, "Test Song", "Test Artist", "Test Album", "2023")
-	assertNoSecrets(t, out, []string{"Jane Photographer", "secret comment", "SecretEncoder", "SN-0042-SECRET", "APIC", "iPhone"})
+	assertHas(t, data, "Jane Photographer", "secret comment", "SecretEncoder", "SN-0042-SECRET", "APIC", "iPhone")
+	assertHas(t, out, "Test Song", "Test Artist", "Test Album", "3/12", "2023")
+	assertNoSecrets(t, out, []string{"Jane Photographer", "secret comment", "SecretEncoder", "SN-0042-SECRET", "iPhone"})
+	assertCoverArt(t, out)
+}
+
+// assertCoverArt checks that out still holds a picture that decodes.
+func assertCoverArt(t *testing.T, out []byte) {
+	t.Helper()
+	i := bytes.Index(out, []byte{0xFF, 0xD8, 0xFF})
+	if i < 0 {
+		t.Fatal("cover art was removed")
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(out[i:])); err != nil {
+		t.Fatalf("kept cover art doesn't decode: %v", err)
+	}
+}
+
+func TestStripFLACKeepsCoverArt(t *testing.T) {
+	res, out, data := stripTestdata(t, "track.flac")
+	assertClean(t, res)
+	assertHas(t, data, "iPhone", "secret comment")
+	assertHas(t, out, "Test Song", "Test Artist")
+	assertNoSecrets(t, out, []string{"Jane Photographer", "secret comment", "SecretEncoder", "iPhone"})
+	assertCoverArt(t, out)
+}
+
+// Cover art is only kept for a shared audio or video file. Inside an
+// archive the same options would keep photos' thumbnails, so a zip of
+// songs loses its cover art.
+func TestArchivedSongLosesCoverArt(t *testing.T) {
+	song, err := os.ReadFile(filepath.Join("testdata", "song.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	w, _ := zw.Create("music/song.mp3")
+	w.Write(song)
+	w, _ = zw.Create("photo.jpg")
+	w.Write(jpegFixture(t, 1))
+	zw.Close()
+	res, out := strip(t, "music.zip", b.Bytes())
+	if !res.Copied || !res.Stripped {
+		t.Fatalf("result %+v", res)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(out), int64(len(out)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range zr.File {
+		body := []byte(readZipEntry(t, f))
+		switch f.Name {
+		case "music/song.mp3":
+			assertHas(t, body, "Test Song")
+			if bytes.Contains(body, []byte("APIC")) {
+				t.Error("cover art kept inside an archive")
+			}
+		case "photo.jpg":
+			assertNoSecrets(t, body, []string{"THUMBSECRET"})
+		}
+	}
 }
 
 func TestStripMP4KeepsUsefulTags(t *testing.T) {
 	res, out, _ := stripTestdata(t, "clip.mp4")
 	assertClean(t, res)
-	assertHas(t, out, "Test Song", "Test Artist")
+	assertHas(t, out, "Test Song", "Test Artist", "Test Album")
 	assertNoSecrets(t, out, []string{"Jane Photographer", "iPhone 14 Pro", "SecretEncoder", "SN-0042-SECRET", "secret comment"})
 }
 

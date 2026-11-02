@@ -38,7 +38,7 @@ default_max_downloads = 1
 
 # Remove GPS, timestamps, device details, author names and similar from a
 # copy of each file before sharing it (the original is never changed).
-# Media keeps its title, artist, album, track and year. 7z and RAR are
+# Media keeps its title, artist, album, track, year and cover art. 7z and RAR are
 # repacked as zip. Files that can't be cleaned are shared as-is with a
 # warning. -k / --keep-metadata turns this off for one share.
 strip_metadata = true

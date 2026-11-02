@@ -28,11 +28,29 @@ import (
 //     video, and the title of documents. Everything else in those tags goes.
 //   - KeepICC: colour profiles, so photos look right.
 //
-// Cover art and thumbnails are removed: metakill keeps both or neither, and
-// a photo's EXIF thumbnail can show the picture before it was cropped.
-// GPS, timestamps, device identifiers, owner and author names and
-// software strings are always removed.
+// Thumbnails are removed: a photo's EXIF thumbnail can show the picture
+// before it was cropped. metakill keeps thumbnails and cover art together
+// or not at all, so cover art is kept (cleaned of its own EXIF) only when
+// the shared file is audio or video; see optionsFor. GPS, timestamps,
+// device identifiers, owner and author names and software strings are
+// always removed.
 var metakillOptions = metakill.Options{KeepTags: true, KeepICC: true}
+
+// mediaFormats are metakill's audio and video formats, whose embedded
+// pictures are cover art. In MKV that keeps attachments (cover images,
+// subtitle fonts); images among them are cleaned.
+var mediaFormats = map[string]bool{
+	"mp3": true, "flac": true, "ogg": true, "mp4": true, "mkv": true, "wav": true, "avi": true,
+}
+
+// optionsFor is metakillOptions, plus cover art for a top-level audio or
+// video file. Archives don't get it, so photos inside them lose their
+// thumbnails.
+func optionsFor(format string) metakill.Options {
+	o := metakillOptions
+	o.KeepThumbnails = mediaFormats[format]
+	return o
+}
 
 type stripResult struct {
 	Copied   bool   // a cleaned copy was written to dst; serve it instead of the original
@@ -85,7 +103,7 @@ func stripMetadata(src, dst, work string) stripResult {
 	} else {
 		// Nothing to remove (plain text, an already-clean photo): serve the
 		// original rather than copying it.
-		pre, err := inspect(src)
+		pre, err := inspect(src, optionsFor(format))
 		if err != nil {
 			return cleanFailed(name, err)
 		}
@@ -102,7 +120,7 @@ func stripMetadata(src, dst, work string) stripResult {
 	}
 
 	// CleanFile stages its output next to in, so it stays inside work.
-	rep, err := metakill.CleanFile(in, metakillOptions)
+	rep, err := metakill.CleanFile(in, optionsFor(format))
 	if err != nil {
 		return cleanFailed(name, err)
 	}
@@ -136,13 +154,13 @@ func firstWarning(rep report.Report) string {
 	return w
 }
 
-func inspect(path string) (report.Report, error) {
+func inspect(path string, opts metakill.Options) (report.Report, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return report.Report{}, err
 	}
 	defer f.Close()
-	return metakill.Inspect(f, filepath.Base(path), metakillOptions)
+	return metakill.Inspect(f, filepath.Base(path), opts)
 }
 
 // cleanFailed is the warning for a file metakill recognised but couldn't
