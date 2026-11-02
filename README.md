@@ -54,7 +54,16 @@ The recipient opens the link in Tor Browser and the file downloads. Neither side
 
 ## Install
 
-GhostShare is built from source and needs Go 1.26 or newer. There are no prebuilt binaries yet.
+Download the archive for your system from the [releases page](https://github.com/computerguymackay/GhostShare/releases/latest): Linux, macOS and Windows, each for x86-64 (`amd64`) and ARM (`arm64`). Each archive holds the `ghostshare` binary with the README and LICENSE; check it against `SHA256SUMS`, then put it on your `PATH`:
+
+```sh
+tar -xzf ghostshare_*_linux_amd64.tar.gz
+sudo mv ghostshare_*_linux_amd64/ghostshare /usr/local/bin/
+```
+
+The macOS binaries aren't signed, so macOS blocks them the first time. Clear the quarantine flag once: `xattr -d com.apple.quarantine /usr/local/bin/ghostshare`.
+
+Or build from source with Go 1.26 or newer:
 
 ```sh
 CGO_ENABLED=0 go install github.com/computerguymackay/ghostshare@latest

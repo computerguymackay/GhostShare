@@ -238,7 +238,7 @@ via GHOSTSHARE_TOR_TEST=1 CLI flag parsing, JSON output, tor-status
 output os/exec against built binary Rule: Tor integration tests must 
 be skippable via env var. go test ./... must stay fast, work without 
 network access, and work without Tor installed. Never let Tor tests 
-block the fast suite. Cross-compile test: CI must run CGO_ENABLED=0 
+block the fast suite. Releases: push a v* tag (git tag v0.1.0 && git push origin v0.1.0); .github/workflows/release.yml tests, builds linux/darwin/windows x amd64/arm64 with CGO_ENABLED=0 and -X main.version, and publishes the GitHub release with SHA256SUMS. Cross-compile test (.github/workflows/ci.yml): CI must run CGO_ENABLED=0 
 GOOS=linux go build and CGO_ENABLED=0 GOOS=windows go build on every 
 PR. This catches CGO regressions immediately. --- Build Order (follow 
 this, do not skip ahead) Phase 0 — Scaffolding · go.mod, directory 

@@ -1,0 +1,53 @@
+# Builds the release binaries and publishes a GitHub release when a v* tag
+# is pushed: git tag v0.1.0 && git push origin v0.1.0
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          ver="${GITHUB_REF_NAME#v}"
+          mkdir dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os="${target%/*}" arch="${target#*/}"
+            name="ghostshare_${ver}_${os}_${arch}"
+            exe=ghostshare; [ "$os" = windows ] && exe=ghostshare.exe
+            mkdir "dist/$name"
+            GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${ver}" -o "dist/$name/$exe" .
+            cp LICENSE README.md "dist/$name/"
+            if [ "$os" = windows ]; then
+              (cd dist && zip -qr "$name.zip" "$name")
+            else
+              tar -C dist -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            --title "GhostShare $GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS

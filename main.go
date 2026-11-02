@@ -27,12 +27,26 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"text/tabwriter"
 	"time"
 )
 
-const version = "0.1.0-dev"
+// version is set by release builds: -ldflags "-X main.version=0.1.0".
+// Otherwise it comes from the module version (go install ...@v0.1.0),
+// or a pseudo-version from git for a checkout build.
+var version = ""
+
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return strings.TrimPrefix(bi.Main.Version, "v")
+	}
+	return "dev"
+}
 
 // attribution must appear in --help and --version (CLAUDE.md, Lineage & Attribution).
 const attribution = "based on QuickShare (github.com/computerguymackay/QuickShare)"
@@ -102,7 +116,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	case "version", "--version":
-		fmt.Fprintf(stdout, "ghostshare %s, %s\n", version, attribution)
+		fmt.Fprintf(stdout, "ghostshare %s, %s\n", versionString(), attribution)
 		return 0
 	case "--":
 		args = args[1:]

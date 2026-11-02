@@ -1,0 +1,25 @@
+# Tests, and checks that CGO_ENABLED=0 cross-compiles still work (CLAUDE.md).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Cross-compile without CGO
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in linux/amd64 darwin/arm64 windows/amd64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null .
+          done
